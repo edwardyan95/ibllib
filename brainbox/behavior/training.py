@@ -52,7 +52,7 @@ class TrainingStatus(IntFlag):
     - A subject may acheive both TRAINED_1A and TRAINED_1B within a single session, therefore it
      is possible to have skipped the TRAINED_1A session status.
     """
-    UNTRAINABLE = auto()
+    UNTRAINABLE = auto() # auto null
     UNBIASABLE = auto()
     IN_TRAINING = auto()
     TRAINED_1A = auto()
