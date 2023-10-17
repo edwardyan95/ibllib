@@ -17,14 +17,29 @@ import brainbox.behavior.pyschofit as psy
 
 _logger = logging.getLogger('ibllib')
 
-TRIALS_KEYS = ['contrastLeft',
-               'contrastRight',
-               'feedbackType',
-               'probabilityLeft',
-               'choice',
-               'response_times',
-               'stimOn_times']
-
+# TRIALS_KEYS = ['contrastLeft',
+#                'contrastRight',
+#                'feedbackType',
+#                'probabilityLeft',
+#                'choice',
+#                'response_times',
+#                'stimOn_times']
+TRIALS_KEYS = ['goCueTrigger_times', 
+               'quiescencePeriod', 
+               'repNum', 
+               'stimOnTrigger_times', 
+               'goCue_times', 
+               'response_times', 
+               'choice', 
+               'stimOn_times', 
+               'contrastLeft', 
+               'contrastRight', 
+               'feedback_times', 
+               'feedbackType', 
+               'rewardVolume', 
+               'probabilityLeft', 
+               'firstMovement_times', 
+               'intervals']
 
 @unique
 class TrainingStatus(IntFlag):
@@ -361,7 +376,7 @@ def display_status(subj, sess_dates, status, perf_easy=None, n_trials=None, psyc
               f"thres={np.around(psych_80[1],2)}, lapse_low={np.around(psych_80[2],2)}, "
               f"lapse_high={np.around(psych_80[3],2)} "
               f"\nMedian reaction time at 0 contrast over last 3 sessions = "
-              f"{np.around(rt, 2)}")
+              f"{rt.round(2)}")
 
 
 def concatenate_trials(trials):
@@ -375,6 +390,7 @@ def concatenate_trials(trials):
     :rtype: dict
     """
     trials_all = Bunch()
+    print(TRIALS_KEYS)
     for k in TRIALS_KEYS:
         trials_all[k] = np.concatenate(list(trials[kk][k] for kk in trials.keys()))
 
