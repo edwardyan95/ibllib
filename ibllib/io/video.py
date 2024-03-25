@@ -209,3 +209,4 @@ def assert_valid_label(label):
     if label.lower() not in VIDEO_LABELS:
         raise ValueError(f"camera must be one of ({', '.join(VIDEO_LABELS)})")
     return label.lower()
+
