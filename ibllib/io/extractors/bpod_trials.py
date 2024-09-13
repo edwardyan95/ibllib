@@ -6,7 +6,7 @@ import logging
 from collections import OrderedDict
 
 from pkg_resources import parse_version
-from ibllib.io.extractors import habituation_trials, training_trials, biased_trials, opto_trials
+from ibllib.io.extractors import habituation_trials, training_trials, training_alt_trials, biased_trials, opto_trials
 import ibllib.io.extractors.base
 import ibllib.io.raw_data_loaders as rawio
 
@@ -43,6 +43,13 @@ def extract_all(session_path, save=True, bpod_trials=None, settings=None, task_c
     # Determine base extraction
     if extractor_type in ['training', 'ephys_training']:
         trials, files_trials = training_trials.extract_all(session_path, bpod_trials=bpod_trials, settings=settings, save=save,
+                                                           task_collection=task_collection, save_path=save_path)
+        # This is hacky but avoids extracting the wheel twice.
+        # files_trials should contain wheel files at the end.
+        files_wheel = []
+        wheel = OrderedDict({k: trials.pop(k) for k in tuple(trials.keys()) if 'wheel' in k})
+    elif extractor_type in ['training_alt']:
+        trials, files_trials = training_alt_trials.extract_all(session_path, bpod_trials=bpod_trials, settings=settings, save=save,
                                                            task_collection=task_collection, save_path=save_path)
         # This is hacky but avoids extracting the wheel twice.
         # files_trials should contain wheel files at the end.
