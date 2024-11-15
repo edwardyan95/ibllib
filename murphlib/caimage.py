@@ -2,6 +2,7 @@ import numpy as np
 import scipy.signal
 import matplotlib.pyplot as plt
 import tifffile
+from scipy.signal import butter, filtfilt
 
 def find_frame_indices(dataframe, frame_rate, time_window, column_keyword):
     # Step 1: Identify the correct column
@@ -82,75 +83,6 @@ def sort_psth_by_average_response(mean_psth, post, frame_rate):
     return sorted_indices_average, sorted_psth_average
 
 
-def plot_mean_psth(mean_psth, frame_rate, title, ax, vmin=None, vmax=None):
-    
-    num_frames_extracted = mean_psth.shape[1]
-    # Time axis correction to center at 0
-    time_axis = np.linspace(-num_frames_extracted/2, num_frames_extracted/2, num_frames_extracted) / frame_rate + 1/frame_rate/2
-    start_time = time_axis[0]
-    end_time = time_axis[-1]
-    num_cells = mean_psth.shape[0]
-
-    # Use the provided ax for plotting, include vmin and vmax for color normalization
-    cax = ax.imshow(mean_psth, aspect='auto', origin='lower', cmap='viridis', 
-                    extent=[start_time, end_time, 0, num_cells], vmin=vmin, vmax=vmax)
-
-    fig = plt.gcf()
-    fig.colorbar(cax, ax=ax, label='Z-score Normalized Activity')
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Cell Index')
-    ax.set_title(f'{title}')
-
-def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='blue'):
-    """
-    Plot the average response across trials with shaded standard error.
-
-    Parameters:
-    - data (numpy.ndarray): 2D array where the first dimension is trials and the second dimension is time points.
-    - ax (matplotlib.axes.Axes, optional): Matplotlib axis object to plot on. If None, a new figure and axis will be created.
-    - title (str, optional): Title for the plot. If None, no title will be set.
-    """
-    if ax is None:
-        fig, ax = plt.subplots()
-
-    # Compute the average response across trials
-    mean_response = np.mean(data, axis=0)
-
-    # Compute the standard error of the mean across trials
-    std_error = np.std(data, axis=0) / np.sqrt(data.shape[0])
-
-    # Time points
-    if time_points is None:
-        time_points = np.arange(data.shape[1])
-    
-
-    # Plot the mean response
-    ax.plot(time_points, mean_response, color=color, label='Mean Response')
-
-    # Shade the standard error
-    ax.fill_between(time_points, mean_response - std_error, mean_response + std_error, color=color, alpha=0.3, label='Standard Error')
-
-    # Set labels and title
-    ax.set_xlabel('Time')
-    ax.set_ylabel('Response')
-    if title is not None:
-        ax.set_title(title)
-    
-    #ax.legend()
-    ax.grid(True)
-
-def plot_roi_masks(dim = (1024, 1024), roi_stat = None, roi_index = None): # roi_index need to be a list
-    im = np.zeros(dim)
-    if roi_index is None or roi_stat is None:
-        print("index for rois or roi stat cannot be none!")
-        return
-    for idx in roi_index:
-        ypix = roi_stat[idx]['ypix']
-        xpix = roi_stat[idx]['xpix']
-        im[ypix,xpix] = 1
-    fig, ax = plt.subplots()
-    cax = ax.imshow(im)
-    plt.show()
 
 def load_tiff(filepath):
     # Open the TIFF file
@@ -242,3 +174,32 @@ def calculate_dff_with_moving_percentile(ca_imaging_data, frame_rate, moving_win
         dff[cell, :] = (ca_imaging_data[cell, :] - baseline) / baseline
 
     return dff
+
+
+
+def butter_filter(data, cutoff, fs, filter_type='low', order=5):
+    """
+    Apply a Butterworth filter to calcium traces.
+    
+    Parameters:
+    data (np.ndarray): 2D array of calcium traces with shape (num_neurons, num_timepoints).
+    cutoff (float): The cutoff frequency for the filter (in Hz).
+    fs (float): The frame rate (sampling frequency) of the data (in Hz).
+    filter_type (str): 'low' for low-pass, 'high' for high-pass. Default is 'low'.
+    order (int): The order of the filter. Default is 5.
+    
+    Returns:
+    np.ndarray: Filtered calcium traces of the same shape as the input.
+    """
+    # Normalize the frequency
+    nyquist = 0.5 * fs  # Nyquist frequency
+    normal_cutoff = cutoff / nyquist  # Normalized cutoff frequency
+
+    # Get the filter coefficients
+    b, a = butter(order, normal_cutoff, btype=filter_type, analog=False)
+    
+    # Apply the filter along the timepoints (axis=1 for 2D array)
+    filtered_data = filtfilt(b, a, data, axis=1)
+    
+    return filtered_data
+

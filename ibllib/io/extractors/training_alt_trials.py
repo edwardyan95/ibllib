@@ -217,10 +217,11 @@ class FeedbackTimes(BaseBpodTrialsExtractor):
 
     def _extract(self):
         # Version check
-        if parse_version(self.settings['IBLRIG_VERSION_TAG']) >= parse_version('5.0.0'):
-            merge = self.get_feedback_times_ge5(self.session_path, task_collection=self.task_collection, data=self.bpod_trials)
-        else:
-            merge = self.get_feedback_times_lt5(self.session_path, task_collection=self.task_collection, data=self.bpod_trials)
+        # if parse_version(self.settings['IBLRIG_VERSION_TAG']) >= parse_version('5.0.0'):
+        #     merge = self.get_feedback_times_ge5(self.session_path, task_collection=self.task_collection, data=self.bpod_trials)
+        # else:
+        #     merge = self.get_feedback_times_lt5(self.session_path, task_collection=self.task_collection, data=self.bpod_trials)
+        merge = self.get_feedback_times_lt5(self.session_path, task_collection=self.task_collection, data=self.bpod_trials)
         return np.array(merge)
 
 
