@@ -669,6 +669,19 @@ class PhasePosQuiescence(BaseBpodTrialsExtractor):
         quiescence = np.array([t['quiescent_period'] for t in self.bpod_trials])
         return phase, position, quiescence
 
+class Omission(BaseBpodTrialsExtractor):
+    save_names = '_ibl_trials.omission.npy'
+    var_names = 'omission'
+
+    def _extract(self):
+        # Get the stim_on_state that triggers the onset of the stim
+        if 'omission' in self.bpod_trials[0]:
+            omission = np.array([tr['omission'] for tr in self.bpod_trials])
+        else:
+            omission = np.full(len(self.bpod_trials), np.nan)
+        return omission
+
+
 
 class TrialsTable(BaseBpodTrialsExtractor):
     """
@@ -685,12 +698,12 @@ class TrialsTable(BaseBpodTrialsExtractor):
 
     def _extract(self, extractor_classes=None, **kwargs):
         base = [Intervals, RuleCueTimes, RuleCueTriggerTimes, ResponseTimes, Choice, StimOnTriggerTimes, StimOnOffFreezeTimes, ContrastLR, FeedbackTimes, FeedbackType,
-                RewardVolume, ProbabilityLeft, Wheel, TrialMod]
+                RewardVolume, ProbabilityLeft, Wheel, TrialMod, Omission]
         out, _ = run_extractor_classes(
             base, session_path=self.session_path, bpod_trials=self.bpod_trials, settings=self.settings, save=False,
             task_collection=self.task_collection)
         table = AlfBunch({k: v for k, v in out.items() if k not in self.var_names})
-        assert len(table.keys()) == 15
+        assert len(table.keys()) == 16
 
         return table.to_df(), *(out.pop(x) for x in self.var_names if x != 'table')
 
