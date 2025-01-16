@@ -2,6 +2,9 @@ import json
 import os
 import numpy as np
 from sklearn.decomposition import PCA
+import scipy.io
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, calinski_harabasz_score
 
 def find_tif_file(directory_path):
     # List all files in the directory
@@ -161,3 +164,90 @@ def perform_pca(df_f_data, n_components=5):
     pca_scores = pca.transform(df_f_data.T)
 
     return pca_components.T, explained_variance, pca_scores.T
+
+def fill_nan_with_previous(arr):
+    """
+    Fill NaN values in the array with the immediate previous non-NaN value.
+    
+    Parameters:
+    arr (np.ndarray): Input array (1D or 2D) with NaN values.
+    
+    Returns:
+    np.ndarray: Array with NaN values filled.
+    """
+    if arr.ndim == 1:  # For 1D arrays
+        mask = np.isnan(arr)
+        # Fill NaN with the last valid value
+        for i in range(1, len(arr)):
+            if mask[i]:
+                arr[i] = arr[i - 1]
+    elif arr.ndim == 2:  # For 2D arrays
+        # Process each row independently
+        for row in range(arr.shape[0]):
+            mask = np.isnan(arr[row])
+            for i in range(1, arr.shape[1]):
+                if mask[i]:
+                    arr[row, i] = arr[row, i - 1]
+    else:
+        raise ValueError("Input array must be 1D or 2D.")
+    
+    return arr
+
+def get_valid_suite2p_stats(path):
+    """
+    from a suite2p path: ...\\suite2p\\plane0, load stat.npy
+    pick cells that are valid cells, attach suite2p id
+    return the stats
+    """
+    stat = np.load(os.path.join(path, 'stat.npy'), allow_pickle=True)
+    iscell = np.load(path+'\\iscell.npy', allow_pickle=True)
+    iscell = iscell[:,0]==1
+    new_stat = []
+    for i, s in enumerate(stat):
+        if iscell[i]:
+            s['id'] = i
+            new_stat.append(s)
+    return new_stat
+
+def get_stat_with_coord(path):
+    suite2p_path = os.path.join(path, 'suite2p', 'plane0')
+    xcoord_atlas = scipy.io.loadmat(os.path.join(path, 'tform_xcoord_atlas.mat'))['tform_xcoord_atlas'][0]
+    ycoord_atlas = scipy.io.loadmat(os.path.join(path, 'tform_ycoord_atlas.mat'))['tform_ycoord_atlas'][0]
+    xcoord_lin = scipy.io.loadmat(os.path.join(path, 'tform_xcoord_lin.mat'))['tform_xcoord_lin'][0]
+    ycoord_lin = scipy.io.loadmat(os.path.join(path, 'tform_ycoord_lin.mat'))['tform_ycoord_lin'][0]
+    stat = get_valid_suite2p_stats(os.path.join(suite2p_path))
+    xcoord_atlas = np.array([sub_arr.flatten() for sub_arr in xcoord_atlas if sub_arr.size > 0], dtype=object)
+    ycoord_atlas = np.array([sub_arr.flatten() for sub_arr in ycoord_atlas if sub_arr.size > 0], dtype=object)
+    xcoord_lin = np.array([sub_arr.flatten() for sub_arr in xcoord_lin if sub_arr.size > 0], dtype=object)
+    ycoord_lin = np.array([sub_arr.flatten() for sub_arr in ycoord_lin if sub_arr.size > 0], dtype=object)
+    for i, s in enumerate(stat):
+        s['xcoord_atlas'] = xcoord_atlas[i]
+        s['ycoord_atlas'] = ycoord_atlas[i]
+        s['xcoord_lin'] = xcoord_lin[i]
+        s['ycoord_lin'] = ycoord_lin[i]
+    return stat
+
+def attach_reg_model_to_stat(stat, model):
+    assert(len(stat)==len(model))
+    for i,s in enumerate(stat):
+        s['beta'] = model[i]['beta']
+        s['intercepts'] = model[i]['intercepts']
+        s['explained_variance'] = model[i]['explained_variance']
+    return stat
+
+def evaluate_clusters(data, max_clusters=10):
+    silhouette_scores = []
+    calinski_harabasz_scores = []
+    wcss = []  # Within-cluster sum of squares
+
+    # Try different numbers of clusters
+    for n_clusters in range(2, max_clusters + 1):
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        labels = kmeans.fit_predict(data)
+        
+        # Calculate metrics
+        silhouette_scores.append(silhouette_score(data, labels))
+        calinski_harabasz_scores.append(calinski_harabasz_score(data, labels))
+        wcss.append(kmeans.inertia_)
+    
+    return silhouette_scores, calinski_harabasz_scores, wcss

@@ -1,10 +1,12 @@
 import pandas as pd
 import numpy as np
-from scipy import interpolate
+from scipy import interpolate, stats
 from scipy.stats import zscore
-from sklearn.linear_model import LinearRegression, Lasso, Ridge
 from sklearn.metrics import explained_variance_score
 from sklearn.model_selection import KFold
+from sklearn.linear_model import LinearRegression, Lasso, Ridge, MultiTaskLasso, MultiTaskElasticNet
+from joblib import Parallel, delayed
+from multiprocessing import Pool
 def generate_event_windows(df, column_names, event_type):
     """
     Generates a list of NumPy arrays where 0 indicates no event and 1 indicates event occurrence in the specified window.
@@ -75,6 +77,9 @@ def transform_trial_table(df):
     pd.DataFrame: Transformed DataFrame with added columns.
     """
     df_transformed = df.copy()
+
+    df_transformed.loc[np.isnan(df_transformed['omission']),'omission'] = 0
+    
     # Add 'leftchoice' column: 1 when 'choice' is -1, NaN otherwise
     df_transformed['leftchoice'] = np.where(df_transformed['choice'] == -1, 1, 0)
 
@@ -82,17 +87,26 @@ def transform_trial_table(df):
     df_transformed['rightchoice'] = np.where(df_transformed['choice'] == 1, 1, 0)
 
     # Add 'reward_times' column: 'feedback_times' where 'feedbackType' is 1, NaN otherwise
-    df_transformed['reward_times'] = np.where(df_transformed['feedbackType'] == 1, df_transformed['feedback_times'], np.nan)
+    df_transformed['reward_times'] = np.where((df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
 
     # Add 'punish_times' column: 'feedback_times' where 'feedbackType' is -1, NaN otherwise
-    df_transformed['punish_times'] = np.where(df_transformed['feedbackType'] == -1, df_transformed['feedback_times'], np.nan)
-
+    df_transformed['punish_times'] = np.where((df_transformed['feedbackType'] == -1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+    df_transformed['omission_times'] = np.where((df_transformed['feedbackType']==1) & (df_transformed['omission'] == 1), df_transformed['feedback_times'], np.nan)
     # Add 'visual_trial' column: 1 where 'modality' is 0, 0 elsewhere
     df_transformed['visual_trial'] = np.where(df_transformed['modality'] == 0, 1, 0)
 
     # Add 'aud_trial' column: 1 where 'modality' is 1, 0 elsewhere
     df_transformed['aud_trial'] = np.where(df_transformed['modality'] == 1, 1, 0)
 
+    df_transformed['vis_reward_times'] = np.where((df_transformed['modality'] == 0) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+    df_transformed['aud_reward_times'] = np.where((df_transformed['modality'] == 1) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+
+    df_transformed['vis_punish_times'] = np.where((df_transformed['modality'] == 0) & (df_transformed['feedbackType'] == -1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+    df_transformed['aud_punish_times'] = np.where((df_transformed['modality'] == 1) & (df_transformed['feedbackType'] == -1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+
+
+    df_transformed['vis_ruleCue_times'] = np.where(df_transformed['modality'] == 0, df_transformed['ruleCue_times'], np.nan)
+    df_transformed['aud_ruleCue_times'] = np.where(df_transformed['modality'] == 1, df_transformed['ruleCue_times'], np.nan)
     # Add 'vis_stimOn' column: 'stimOnTrigger_times' where 'modality' is 0, NaN otherwise
     df_transformed['left_vis_stimOn_times'] = np.where(df_transformed['contrastLeft'] > 0, df_transformed['vis_stimOn_times'], np.nan)
     df_transformed['right_vis_stimOn_times'] = np.where(df_transformed['contrastRight'] > 0, df_transformed['vis_stimOn_times'], np.nan)
@@ -331,7 +345,10 @@ def construct_design_matrix(event_predictors_list, event_predictor_names,
     
     # Z-score and add event predictors and their names
     for event_predictors, event_name in zip(event_predictors_list, event_predictor_names):
-        zscored_event = zscore(event_predictors)  # Z-score each event predictor
+        if np.sum(event_predictors==0) == len(event_predictors): # all zero arrays cannot be zscored
+            pass
+        else:
+            zscored_event = zscore(event_predictors)  # Z-score each event predictor
         predictors.append(zscored_event)
         predictor_names.append(event_name)
     
@@ -353,163 +370,328 @@ def construct_design_matrix(event_predictors_list, event_predictor_names,
     
     return design_matrix, predictor_names
 
-def estimate_beta(F, design_matrix, regression_type='linear', alpha=1.0):
+def block_shuffle(data, block_size, random_state=None):
     """
-    Estimate beta coefficients for each neuron using least squares, Lasso, or Ridge regression.
+    Shuffle time series data in blocks, preserving the last incomplete block.
     
     Parameters:
-    F (np.ndarray): Neural data array of shape (num_neurons, timepoints).
-    design_matrix (np.ndarray): Design matrix of shape (timepoints, num_predictors).
-    regression_type (str): Type of regression ('linear', 'lasso', 'ridge').
-    alpha (float): Regularization strength (used only for Lasso or Ridge).
+    data: array of shape (num_neurons, timepoints)
+    block_size: number of timepoints per block
     
     Returns:
-    tuple: (Beta coefficients array, intercepts array)
-        - Beta coefficients array of shape (num_neurons, num_predictors).
-        - Intercepts array of shape (num_neurons,).
+    shuffled data of same shape
     """
-    num_neurons, _ = F.shape
-    num_predictors = design_matrix.shape[1]
+    rng = np.random.RandomState(random_state)
+    n_neurons, n_timepoints = data.shape
+    n_blocks = n_timepoints // block_size
+    remainder = n_timepoints % block_size
     
-    # Initialize arrays to store the beta coefficients and intercepts for each neuron
+    if remainder == 0:
+        # If data length is exactly divisible by block_size
+        blocks = data.reshape(n_neurons, n_blocks, block_size)
+        block_indices = rng.permutation(n_blocks)
+        shuffled_data = blocks[:, block_indices, :].reshape(n_neurons, n_timepoints)
+    else:
+        # Handle the main blocks
+        main_data = data[:, :(n_blocks * block_size)]
+        blocks = main_data.reshape(n_neurons, n_blocks, block_size)
+        block_indices = rng.permutation(n_blocks)
+        shuffled_main = blocks[:, block_indices, :].reshape(n_neurons, -1)
+        
+        # Preserve the remainder block at the end
+        remainder_data = data[:, (n_blocks * block_size):]
+        shuffled_data = np.concatenate([shuffled_main, remainder_data], axis=1)
+    
+    return shuffled_data
+
+def compute_cv_F_stats(F, design_matrix, kf, unique_predictors, full_predictors, reg_model):
+    """Helper function to compute cross-validated F-statistics for one dataset"""
+    num_neurons = F.shape[0]
+    num_unique_predictors = len(unique_predictors)
+    n_splits = kf.n_splits
+    
+    # Arrays to store RSS for each fold
+    cv_full_RSS = np.zeros((n_splits, num_neurons))
+    cv_reduced_RSS = np.zeros((n_splits, num_neurons, num_unique_predictors))
+    
+    # print("F shape:", F.shape)
+    # print("Design matrix shape:", design_matrix.shape)
+    # print("Number of splits:", kf.n_splits)
+
+    for fold_idx, (train_index, test_index) in enumerate(kf.split(design_matrix)):
+        # print("Max train index:", max(train_index))
+        # print("Max test index:", max(test_index))
+        X_train, X_test = design_matrix[train_index], design_matrix[test_index]
+        y_train, y_test = F[:, train_index].T, F[:, test_index].T
+        
+        # Fit full model
+        reg = reg_model()
+        reg.fit(X_train, y_train)
+        y_pred_test = reg.predict(X_test)
+        
+        # Calculate full model RSS on test data
+        cv_full_RSS[fold_idx] = np.sum((y_test - y_pred_test) ** 2, axis=0)
+        
+        # Calculate reduced model RSS for each predictor
+        for unique_idx, unique_name in enumerate(unique_predictors):
+            columns_to_remove = [i for i, name in enumerate(full_predictors) if unique_name in name]
+            X_train_reduced = np.delete(X_train, columns_to_remove, axis=1)
+            X_test_reduced = np.delete(X_test, columns_to_remove, axis=1)
+            
+            reg_reduced = reg_model()
+            reg_reduced.fit(X_train_reduced, y_train)
+            y_pred_test_reduced = reg_reduced.predict(X_test_reduced)
+            
+            cv_reduced_RSS[fold_idx, :, unique_idx] = np.sum(
+                (y_test - y_pred_test_reduced) ** 2, axis=0
+            )
+    
+    # Average RSS across folds
+    mean_full_RSS = np.mean(cv_full_RSS, axis=0)
+    mean_reduced_RSS = np.mean(cv_reduced_RSS, axis=0)
+    
+    # Store both F-stats and RSS differences for later analysis
+    F_stats = np.zeros((num_neurons, num_unique_predictors))
+    RSS_differences = np.zeros((num_neurons, num_unique_predictors))
+    
+    for unique_idx in range(num_unique_predictors):
+        delta_p = len([i for i, name in enumerate(full_predictors) 
+                      if unique_predictors[unique_idx] in name])
+        df1 = delta_p
+        df2 = len(test_index) - design_matrix.shape[1]
+        
+        # Calculate RSS difference and set negative values to 0
+        RSS_diff = mean_reduced_RSS[:, unique_idx] - mean_full_RSS
+        RSS_differences[:, unique_idx] = RSS_diff  # store original differences
+        RSS_diff = np.maximum(RSS_diff, 0)  # force non-negative
+        
+        numerator = RSS_diff / df1
+        denominator = mean_full_RSS / df2
+        F_stats[:, unique_idx] = numerator / denominator
+    
+    return F_stats, RSS_differences, mean_full_RSS, mean_reduced_RSS
+
+def bootstrap_iteration(iteration, F, design_matrix, kf, unique_predictors, full_predictors, 
+                       reg_model, block_size):
+    """Single bootstrap iteration for parallel processing"""
+    F_shuffled = block_shuffle(F, block_size, random_state=iteration)
+    F_stats, RSS_diffs, full_RSS, red_RSS = compute_cv_F_stats(
+        F_shuffled, design_matrix, kf, unique_predictors, full_predictors, reg_model
+    )
+    return F_stats, RSS_diffs, full_RSS, red_RSS
+
+def encoding_model_with_significance_cv(
+    F, 
+    design_matrix, 
+    frame_rate,
+    regression_type='linear', 
+    alpha=1.0,  # renamed from alpha to avoid confusion
+    n_splits=5, 
+    n_bootstraps=100,
+    unique_predictors=None, 
+    full_predictors=None,
+    n_jobs=-1
+):
+    """
+    Encoding model analysis with cross-validated F-statistics and block bootstrap testing.
+    
+    Returns beta coefficients, intercepts, explained variances, and significance measures.
+    """
+    num_neurons, T = F.shape
+    num_predictors = design_matrix.shape[1]
+    num_unique_predictors = len(unique_predictors)
+    
+    # Initialize arrays
     beta_matrix = np.zeros((num_neurons, num_predictors))
     intercepts = np.zeros(num_neurons)
-    
-    # Loop over each neuron and fit the regression model
-    for neuron_idx in range(num_neurons):
-        if regression_type == 'linear':
-            reg = LinearRegression(fit_intercept=True)
-        elif regression_type == 'lasso':
-            reg = Lasso(alpha=alpha, fit_intercept=True)
-        elif regression_type == 'ridge':
-            reg = Ridge(alpha=alpha, fit_intercept=True)
-        else:
-            raise ValueError("Invalid regression type. Choose 'linear', 'lasso', or 'ridge'.")
-        
-        # Fit the model for the current neuron's data
-        reg.fit(design_matrix, F[neuron_idx])
-        
-        # Store the beta coefficients and intercept
-        beta_matrix[neuron_idx, :] = reg.coef_
-        intercepts[neuron_idx] = reg.intercept_
-    
-    return beta_matrix, intercepts
-
-def encoding_model(F, design_matrix, regression_type='linear', alpha=1.0, n_splits=5):
-    """
-    Implement the encoding model with pre-constructed design matrix and return cross-validated explained variance.
-    
-    Parameters:
-    F (np.ndarray): Neural data array of shape (num_neurons, timepoints).
-    design_matrix (np.ndarray): Design matrix of shape (timepoints, num_predictors).
-    regression_type (str): Type of regression ('linear', 'lasso', 'ridge').
-    alpha (float): Regularization strength (used only for Lasso or Ridge).
-    n_splits (int): Number of splits for cross-validation.
-    
-    Returns:
-    tuple: (beta coefficients array, intercepts array, cross-validated explained variance array)
-        - beta coefficients array of shape (num_neurons, num_predictors)
-        - intercepts array of shape (num_neurons,)
-        - explained variance array of shape (num_neurons,)
-    """
-    num_neurons, T = F.shape  # F is now of shape (num_neurons, timepoints)
-    
-    # Estimate beta coefficients and intercepts for each neuron using all data
-    beta_matrix, intercepts = estimate_beta(F, design_matrix, regression_type=regression_type, alpha=alpha)
-    
-    # Initialize an array to store cross-validated explained variance for each neuron
     explained_variances = np.zeros(num_neurons)
+    unique_explained_variances = np.zeros((num_neurons, num_unique_predictors))
+    F_statistics = np.zeros((num_neurons, num_unique_predictors))
+    p_values = np.zeros((num_neurons, num_unique_predictors))
+    bootstrap_p_values = np.zeros((num_neurons, num_unique_predictors))
     
     # Cross-validation setup
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
     
-    # Calculate cross-validated explained variance for each neuron
-    for neuron_idx in range(num_neurons):
-        fold_variances = []
-        
-        for train_index, test_index in kf.split(design_matrix):
-            X_train, X_test = design_matrix[train_index], design_matrix[test_index]
-            y_train, y_test = F[neuron_idx, train_index], F[neuron_idx, test_index]
-            
-            # Choose the regression model
-            if regression_type == 'linear':
-                reg = LinearRegression(fit_intercept=True)
-            elif regression_type == 'lasso':
-                reg = Lasso(alpha=alpha, fit_intercept=True)
-            elif regression_type == 'ridge':
-                reg = Ridge(alpha=alpha, fit_intercept=True)
-            else:
-                raise ValueError("Invalid regression type. Choose 'linear', 'lasso', or 'ridge'.")
-            
-            # Fit the model on the training set
-            reg.fit(X_train, y_train)
-            
-            # Predict on the test set
-            y_pred = reg.predict(X_test)
-            
-            # Calculate explained variance for this fold and append
-            fold_variances.append(explained_variance_score(y_test, y_pred))
-        
-        # Average explained variance across folds for the current neuron
-        explained_variances[neuron_idx] = np.mean(fold_variances)
+    # Choose regression model type
+    if regression_type == 'linear':
+        RegModel = lambda: LinearRegression(fit_intercept=True)
+    elif regression_type == 'ridge':
+        RegModel = lambda: Ridge(alpha=alpha, fit_intercept=True)
+    elif regression_type == 'lasso':
+        RegModel = lambda: MultiTaskLasso(alpha=alpha, fit_intercept=True)
+    else:
+        raise ValueError("Invalid regression type. Choose 'linear', 'lasso', or 'ridge'.")
     
-    return beta_matrix, intercepts, explained_variances
+    # Check for collinearity using VIF
+    # def calculate_vif(X):
+    #     vif_stats = []
+    #     for i in range(X.shape[1]):
+    #         # Get R² from regressing feature i on all other features
+    #         other_cols = list(range(X.shape[1]))
+    #         other_cols.pop(i)
+            
+    #         reg = LinearRegression()
+    #         reg.fit(X[:, other_cols], X[:, i])
+    #         r2 = reg.score(X[:, other_cols], X[:, i])
+            
+    #         # Calculate VIF
+    #         vif = 1 / (1 - r2) if r2 != 1 else float('inf')
+    #         vif_stats.append(vif)
+    #     return np.array(vif_stats)
+    
+    # # Calculate VIF for each predictor
+    # vif_values = calculate_vif(design_matrix)
+    # high_vif_idx = np.where(vif_values > 5)[0]  # VIF > 5 indicates potential collinearity
+    # if len(high_vif_idx) > 0:
+    #     warnings.warn(f"High collinearity detected for predictors at indices {high_vif_idx} "
+    #                  f"with VIF values {vif_values[high_vif_idx]}")
+    
+    # Fit full model on entire dataset to get beta coefficients and intercepts
+    full_model = RegModel()
+    full_model.fit(design_matrix, F.T)
+    beta_matrix = full_model.coef_
+    intercepts = full_model.intercept_
+    
+    # Calculate total explained variance for each neuron
+    y_pred = full_model.predict(design_matrix)
+    total_ss = np.sum((F.T - np.mean(F.T, axis=0))**2, axis=0)
+    residual_ss = np.sum((F.T - y_pred)**2, axis=0)
+    explained_variances = 1 - (residual_ss / total_ss)
+    
+    # Calculate unique explained variance for each predictor
+    for unique_idx, unique_name in enumerate(unique_predictors):
+        # Remove columns corresponding to this predictor
+        columns_to_remove = [i for i, name in enumerate(full_predictors) if unique_name in name]
+        X_reduced = np.delete(design_matrix, columns_to_remove, axis=1)
+        
+        # Fit reduced model
+        reduced_model = RegModel()
+        reduced_model.fit(X_reduced, F.T)
+        y_pred_reduced = reduced_model.predict(X_reduced)
+        
+        # Calculate unique explained variance
+        residual_ss_reduced = np.sum((F.T - y_pred_reduced)**2, axis=0)
+        unique_explained_variances[:, unique_idx] = (residual_ss_reduced - residual_ss) / total_ss
+    
+    # Compute real cross-validated F-statistics and RSS values
+    F_statistics, RSS_differences, real_full_RSS, real_reduced_RSS = compute_cv_F_stats(
+        F, design_matrix, kf, unique_predictors, full_predictors, RegModel
+    )
+    
+    # Calculate parametric p-values with correction for multiple comparisons
+    for n in range(num_neurons):
+        for unique_idx in range(num_unique_predictors):
+            delta_p = len([i for i, name in enumerate(full_predictors) 
+                          if unique_predictors[unique_idx] in name])
+            df1 = delta_p
+            # Correct df2 calculation - use actual test set size
+            df2 = len(design_matrix) // n_splits - design_matrix.shape[1]
+            # Ensure degrees of freedom are positive
+            if df2 <= 0:
+                p_values[n, unique_idx] = 1.0
+                continue
+                
+            # Calculate raw p-value
+            raw_p = 1 - stats.f.cdf(F_statistics[n, unique_idx], df1, df2)
+            # Store raw p-value for multiple comparison correction later
+            p_values[n, unique_idx] = raw_p
+    
+    
+    # Perform parallel bootstrap iterations
+    block_size = int(frame_rate)  # 1 second blocks
+    
+    bootstrap_results = Parallel(n_jobs=n_jobs)(
+        delayed(bootstrap_iteration)(
+            i, F, design_matrix, kf, unique_predictors, full_predictors, RegModel, block_size
+        ) for i in range(n_bootstraps)
+    )
+    
+    # Unpack bootstrap results
+    bootstrap_F_stats = np.array([res[0] for res in bootstrap_results])
+    bootstrap_RSS_diffs = np.array([res[1] for res in bootstrap_results])
+    
+    # Compute bootstrap p-values
+    for n in range(num_neurons):
+        for p in range(num_unique_predictors):
+            # Add 1 to both numerator and denominator (recommended practice)
+            bootstrap_p_values[n, p] = (1 + np.sum(
+                bootstrap_F_stats[:, n, p] >= F_statistics[n, p]
+            )) / (n_bootstraps + 1)
+            
+    
+    # Compute confidence intervals (95%)
+    confidence_intervals = np.zeros((num_neurons, num_unique_predictors, 2))
+    for n in range(num_neurons):
+        for p in range(num_unique_predictors):
+            confidence_intervals[n, p] = np.percentile(
+                bootstrap_F_stats[:, n, p], [2.5, 97.5]
+            )
+    
+    # Count negative RSS differences
+    negative_RSS_diff_counts = np.sum(RSS_differences < 0, axis=0)
+    
+    return (
+        beta_matrix,
+        intercepts,
+        explained_variances,
+        unique_explained_variances,
+        F_statistics,
+        p_values,
+        bootstrap_p_values,
+        bootstrap_F_stats,
+        confidence_intervals,
+        negative_RSS_diff_counts
+    )
 
-def encoding_model_with_significance(F, design_matrix, regression_type='linear', alpha=1.0):
+
+
+
+
+def grid_search_encoding_model(F, design_matrix, param_grid, n_splits=5):
     """
-    Implement the encoding model with significance testing for each predictor and return reduced explained variance.
+    Perform grid search over hyperparameters for the encoding model.
     
     Parameters:
     F (np.ndarray): Neural data array of shape (num_neurons, timepoints).
     design_matrix (np.ndarray): Design matrix of shape (timepoints, num_predictors).
-    regression_type (str): Type of regression ('linear', 'lasso', 'ridge').
-    alpha (float): Regularization strength (used only for Lasso or Ridge).
+    param_grid (dict): Dictionary containing parameter grid for 'regression_type' and 'alpha'.
+        Example: {'regression_type': ['linear', 'lasso', 'ridge'], 'alpha': [0.1, 1.0, 10.0]}.
+    n_splits (int): Number of splits for cross-validation.
     
     Returns:
-    tuple: 
-        - beta_matrix: Beta coefficients array of shape (num_neurons, num_predictors).
-        - intercepts: Intercepts array of shape (num_neurons,).
-        - explained_variances: Explained variance array of shape (num_neurons,).
-        - reduced_explained_variances: Reduced explained variance array of shape (num_neurons, num_predictors).
-        - F_statistics: F-statistics array of shape (num_neurons, num_predictors).
+    dict: Best parameters and their corresponding explained variance.
+        Example: {'best_params': {'regression_type': 'ridge', 'alpha': 1.0}, 'best_variance': 0.85}
     """
-    num_neurons, T = F.shape  # F is now of shape (num_neurons, timepoints)
-    num_predictors = design_matrix.shape[1]
+    from itertools import product
+    import numpy as np
     
-    # Estimate beta coefficients and intercepts for each neuron (full model)
-    beta_matrix, intercepts = estimate_beta(F, design_matrix, regression_type=regression_type, alpha=alpha)
+    # Initialize variables to store the best results
+    best_params = None
+    best_variance = -np.inf  # Start with the lowest possible variance
     
-    # Initialize arrays to store explained variance, reduced explained variance, and F-statistics
-    explained_variances = np.zeros(num_neurons)
-    reduced_explained_variances = np.zeros((num_neurons, num_predictors))
-    F_statistics = np.zeros((num_neurons, num_predictors))
+    # Get all combinations of parameters from the param grid
+    param_combinations = list(product(param_grid['regression_type'], param_grid['alpha']))
     
-    # Full model residual sum of squares (RSS)
-    RSS_full = np.zeros(num_neurons)
-    
-    # Calculate explained variance for the full model and RSS
-    for neuron_idx in range(num_neurons):
-        F_pred = design_matrix @ beta_matrix[neuron_idx, :] + intercepts[neuron_idx]
-        RSS_full[neuron_idx] = np.sum((F[neuron_idx] - F_pred) ** 2)
-        explained_variances[neuron_idx] = explained_variance_score(F[neuron_idx], F_pred)
-    
-    # Fit reduced models by removing each predictor and calculate F-statistics and reduced explained variance
-    for predictor_idx in range(num_predictors):
-        # Create a reduced design matrix by removing the current predictor
-        reduced_design_matrix = np.delete(design_matrix, predictor_idx, axis=1)
+    # Iterate over all parameter combinations
+    for regression_type, alpha in param_combinations:
+        print(f"Testing parameters: regression_type={regression_type}, alpha={alpha}")
         
-        # Estimate beta coefficients and intercepts for the reduced model
-        reduced_beta_matrix, reduced_intercepts = estimate_beta(F, reduced_design_matrix, regression_type=regression_type, alpha=alpha)
+        # Run the encoding model with the current parameters
+        _, _, explained_variances = encoding_model(
+            F, 
+            design_matrix, 
+            regression_type=regression_type, 
+            alpha=alpha, 
+            n_splits=n_splits
+        )
         
-        # Calculate the explained variance and RSS for the reduced model
-        for neuron_idx in range(num_neurons):
-            F_pred_reduced = reduced_design_matrix @ reduced_beta_matrix[neuron_idx, :] + reduced_intercepts[neuron_idx]
-            RSS_reduced = np.sum((F[neuron_idx] - F_pred_reduced) ** 2)
-            reduced_explained_variances[neuron_idx, predictor_idx] = explained_variance_score(F[neuron_idx], F_pred_reduced)
-            
-            # Calculate F-statistic for this predictor
-            numerator = (RSS_reduced - RSS_full[neuron_idx]) / 1  # Degrees of freedom lost = 1
-            denominator = RSS_full[neuron_idx] / (T - num_predictors)
-            F_statistics[neuron_idx, predictor_idx] = numerator / denominator
+        # Compute the average explained variance across neurons
+        avg_variance = np.mean(explained_variances)
+        
+        # Update the best parameters if the current setup is better
+        if avg_variance > best_variance:
+            best_variance = avg_variance
+            best_params = {'regression_type': regression_type, 'alpha': alpha}
     
-    return beta_matrix, intercepts, explained_variances, reduced_explained_variances, F_statistics
+    return {'best_params': best_params, 'best_variance': best_variance}

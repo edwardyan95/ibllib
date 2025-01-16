@@ -20,7 +20,7 @@ def plot_mean_psth(mean_psth, frame_rate, title, ax, vmin=None, vmax=None):
     ax.set_ylabel('Cell Index')
     ax.set_title(f'{title}')
 
-def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='blue'):
+def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='blue', ymin=None, ymax=None):
     """
     Plot the average response across trials with shaded standard error.
 
@@ -28,6 +28,8 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='
     - data (numpy.ndarray): 2D array where the first dimension is trials and the second dimension is time points.
     - ax (matplotlib.axes.Axes, optional): Matplotlib axis object to plot on. If None, a new figure and axis will be created.
     - title (str, optional): Title for the plot. If None, no title will be set.
+    - ymin (float, optional): Minimum value for the y-axis. If None, it will be determined automatically.
+    - ymax (float, optional): Maximum value for the y-axis. If None, it will be determined automatically.
     """
     if ax is None:
         fig, ax = plt.subplots()
@@ -41,7 +43,6 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='
     # Time points
     if time_points is None:
         time_points = np.arange(data.shape[1])
-    
 
     # Plot the mean response
     ax.plot(time_points, mean_response, color=color, label='Mean Response')
@@ -54,9 +55,19 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='
     ax.set_ylabel('Response')
     if title is not None:
         ax.set_title(title)
-    
-    #ax.legend()
-    ax.grid(True)
+
+    # Set y-axis limits
+    if ymin is not None or ymax is not None:
+        ax.set_ylim(ymin, ymax)
+
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # Add grid lines
+    #ax.grid(True)
+
+
 
 def plot_roi_masks(ax=None, dim=(1024, 1024), roi_stat=None, roi_index=None, roi_data=None, vmin=None, vmax=None):
     """
