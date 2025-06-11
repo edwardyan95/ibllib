@@ -65,7 +65,7 @@ def generate_event_windows(df, column_names, event_type):
     return output_arrays
 
 
-def transform_trial_table(df):
+def transform_trial_table(df, valve_silent = False):
     """
     Transforms the input trial DataFrame by adding columns for left/right choices, reward/punish times,
     and trial modality (visual/auditory).
@@ -87,7 +87,10 @@ def transform_trial_table(df):
     df_transformed['rightchoice'] = np.where(df_transformed['choice'] == 1, 1, 0)
 
     # Add 'reward_times' column: 'feedback_times' where 'feedbackType' is 1, NaN otherwise
-    df_transformed['reward_times'] = np.where((df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+    if valve_silent:
+        df_transformed['reward_times'] = np.where((df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['reward_consume_times'], np.nan)
+    else:
+        df_transformed['reward_times'] = np.where((df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
 
     # Add 'punish_times' column: 'feedback_times' where 'feedbackType' is -1, NaN otherwise
     df_transformed['punish_times'] = np.where((df_transformed['feedbackType'] == -1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
@@ -97,9 +100,12 @@ def transform_trial_table(df):
 
     # Add 'aud_trial' column: 1 where 'modality' is 1, 0 elsewhere
     df_transformed['aud_trial'] = np.where(df_transformed['modality'] == 1, 1, 0)
-
-    df_transformed['vis_reward_times'] = np.where((df_transformed['modality'] == 0) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
-    df_transformed['aud_reward_times'] = np.where((df_transformed['modality'] == 1) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+    if valve_silent:
+        df_transformed['vis_reward_times'] = np.where((df_transformed['modality'] == 0) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['reward_consume_times'], np.nan)
+        df_transformed['aud_reward_times'] = np.where((df_transformed['modality'] == 1) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['reward_consume_times'], np.nan)
+    else:
+        df_transformed['vis_reward_times'] = np.where((df_transformed['modality'] == 0) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
+        df_transformed['aud_reward_times'] = np.where((df_transformed['modality'] == 1) & (df_transformed['feedbackType'] == 1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
 
     df_transformed['vis_punish_times'] = np.where((df_transformed['modality'] == 0) & (df_transformed['feedbackType'] == -1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)
     df_transformed['aud_punish_times'] = np.where((df_transformed['modality'] == 1) & (df_transformed['feedbackType'] == -1) & (df_transformed['omission'] == 0), df_transformed['feedback_times'], np.nan)

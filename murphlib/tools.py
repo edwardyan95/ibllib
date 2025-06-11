@@ -5,7 +5,7 @@ from sklearn.decomposition import PCA
 import scipy.io
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score, calinski_harabasz_score
-
+import tifffile
 def find_tif_file(directory_path):
     # List all files in the directory
     files = os.listdir(directory_path)
@@ -20,7 +20,16 @@ def find_tif_file(directory_path):
     elif len(tif_files) == 0:
         return "No .tif files found in the directory."
     else:
-        return "Multiple .tif files found in the directory."
+        # Return a list of full paths if multiple .tif files are found
+        return [os.path.join(directory_path, f) for f in tif_files]
+
+def load_tif_file(tif_file):
+    with tifffile.TiffFile(tif_file) as tif:
+        substack = []
+        for ind, page in enumerate(tif.pages):
+            image = page.asarray()
+            substack.append(image)
+        return substack
 
 def parse_text_to_dict(text):
     # Split the text into lines and initialize an empty dictionary
@@ -216,6 +225,10 @@ def get_stat_with_coord(path):
     xcoord_lin = scipy.io.loadmat(os.path.join(path, 'tform_xcoord_lin.mat'))['tform_xcoord_lin'][0]
     ycoord_lin = scipy.io.loadmat(os.path.join(path, 'tform_ycoord_lin.mat'))['tform_ycoord_lin'][0]
     stat = get_valid_suite2p_stats(os.path.join(suite2p_path))
+    aspect_ratio = np.array([stat[i]['aspect_ratio'] for i in range(len(stat))])
+    npix = np.array([stat[i]['npix'] for i in range(len(stat))])
+    dd_idx = (aspect_ratio > 1.1) | (npix > 120) | (npix < 100)
+    pc_idx = (aspect_ratio<1.1) & (npix<120) & (npix>100)
     xcoord_atlas = np.array([sub_arr.flatten() for sub_arr in xcoord_atlas if sub_arr.size > 0], dtype=object)
     ycoord_atlas = np.array([sub_arr.flatten() for sub_arr in ycoord_atlas if sub_arr.size > 0], dtype=object)
     xcoord_lin = np.array([sub_arr.flatten() for sub_arr in xcoord_lin if sub_arr.size > 0], dtype=object)
@@ -225,14 +238,36 @@ def get_stat_with_coord(path):
         s['ycoord_atlas'] = ycoord_atlas[i]
         s['xcoord_lin'] = xcoord_lin[i]
         s['ycoord_lin'] = ycoord_lin[i]
+        s['celltype'] = 'dendrite' if dd_idx[i] else 'soma'
+        
     return stat
 
 def attach_reg_model_to_stat(stat, model):
+    
     assert(len(stat)==len(model))
     for i,s in enumerate(stat):
         s['beta'] = model[i]['beta']
         s['intercepts'] = model[i]['intercepts']
-        s['explained_variance'] = model[i]['explained_variance']
+        try:
+            s['explained_variance'] = model[i]['explained_variance']
+        except:
+            continue
+        try:
+            s['unique_explained_variance'] = model[i]['unique_explained_variance']
+        except:
+            continue
+        try:
+            s['f_stat'] = model[i]['f_stat']
+        except:
+            continue
+        try:
+            s['bootstrap_p_value'] = model[i]['bootstrap_p_value']
+        except:
+            continue
+        try:
+            s['bootstrap_f_stat'] = model[i]['bootstrap_f_stat']
+        except:
+            continue
     return stat
 
 def evaluate_clusters(data, max_clusters=10):
@@ -251,3 +286,146 @@ def evaluate_clusters(data, max_clusters=10):
         wcss.append(kmeans.inertia_)
     
     return silhouette_scores, calinski_harabasz_scores, wcss
+
+def holm_bonferroni_correction(p_values):
+    """
+    Apply Holm-Bonferroni correction across tests
+    
+    Parameters:
+    p_values: array of shape (num_tests,) for a single neuron
+              or shape (num_neurons, num_tests) for multiple neurons
+    
+    Returns:
+    corrected p-values of same shape as input
+    """
+    # Check if input is 1D or 2D
+    input_is_1d = p_values.ndim == 1
+    
+    # If 1D, convert to 2D temporarily
+    if input_is_1d:
+        p_values = p_values.reshape(1, -1)
+    
+    num_neurons, num_tests = p_values.shape
+    p_corrected = np.zeros_like(p_values)
+    
+    # Apply correction separately for each neuron
+    for i in range(num_neurons):
+        # Get p-values for this neuron
+        p_neuron = p_values[i]
+        
+        # Get sorting indices and ranks
+        sorted_indices = np.argsort(p_neuron)
+        ranks = np.argsort(sorted_indices)  # to map back to original order
+        
+        # Apply Holm's correction
+        p_sorted = p_neuron[sorted_indices]
+        p_corrected_sorted = np.minimum(1, p_sorted * (num_tests - np.arange(num_tests)))
+        
+        # Ensure monotonicity (each element should be >= previous)
+        for j in range(1, len(p_corrected_sorted)):
+            p_corrected_sorted[j] = max(p_corrected_sorted[j], p_corrected_sorted[j-1])
+        
+        # Map back to original order
+        p_corrected[i] = p_corrected_sorted[ranks]
+    
+    # If input was 1D, convert output back to 1D
+    if input_is_1d:
+        p_corrected = p_corrected.flatten()
+    
+    return p_corrected
+
+def calculate_zstack_fluo(neuron_stats, zstack_mean):
+    """
+    Calculates the mean fluorescence of each neuron in each z-plane.
+
+    Parameters:
+    neuron_stats (list of dict): A list where each dict contains neuron information,
+                                 including 'xpix' and 'ypix' for pixel coordinates.
+    zstack_mean (np.ndarray): A 3D array of shape (num_planes, num_ypixels_image, num_xpixels_image)
+                              representing the mean image of each z-plane.
+
+    Returns:
+    np.ndarray: An array of shape (num_neurons, num_planes) containing the mean
+                fluorescence of each neuron in each z-plane.
+    """
+    num_neurons = len(neuron_stats)
+    num_planes = zstack_mean.shape[0]
+
+    zstack_fluo = np.zeros((num_neurons, num_planes))
+
+    for i in range(num_neurons):
+        neuron_ypix = neuron_stats[i]['ypix'] # y-coordinates are typically rows
+        neuron_xpix = neuron_stats[i]['xpix'] # x-coordinates are typically columns
+
+        for j in range(num_planes):
+            plane_image = zstack_mean[j, :, :] 
+            # Extract fluorescence values for the neuron's pixels in the current plane
+            # Ensure coordinates are within image bounds
+            # Note: In image indexing, y comes before x: image[y, x]
+            neuron_pixel_fluorescence = plane_image[neuron_ypix, neuron_xpix]
+            
+            # Calculate the mean fluorescence for the neuron in this plane
+            if neuron_pixel_fluorescence.size > 0:
+                zstack_fluo[i, j] = np.mean(neuron_pixel_fluorescence)
+            else:
+                zstack_fluo[i, j] = np.nan # Or 0, if preferred for empty pixel sets
+                
+    return zstack_fluo
+
+def detect_licking_events(motion_energy, threshold=2.0, distance=5):
+    """
+    Detects discrete licking events from a motion energy signal by finding peaks
+    in the z-scored signal.
+
+    This function first z-scores the motion energy signal, then identifies peaks
+    that are above a certain threshold (in standard deviations) and separated by a
+    minimum distance.
+
+    Parameters:
+    motion_energy (np.ndarray): 1D array representing motion energy over time.
+    threshold (float): The z-score threshold for detecting a peak. Only peaks with
+                       a z-score higher than this value will be considered.
+                       Default is 2.0 (2 standard deviations above the mean).
+    distance (int): The minimum required horizontal distance (in frames/samples)
+                    between neighboring peaks. Default is 5 frames.
+
+    Returns:
+    np.ndarray: An array of indices (timepoints/frames) where licking events are detected.
+    """
+    # Z-score the motion energy signal
+    z_scored_energy = (motion_energy - np.mean(motion_energy)) / np.std(motion_energy)
+    
+    # find_peaks is well-suited for this task.
+    # 'height' parameter serves as our threshold on the z-scored signal.
+    # 'distance' ensures that we don't count the same lick multiple times.
+    lick_indices, _ = scipy.signal.find_peaks(z_scored_energy, height=threshold, distance=distance)
+    
+    return lick_indices
+
+def find_first_event_after(event_times, target_times):
+    """
+    For each target time, finds the timestamp of the first event that occurs at or after it.
+
+    Parameters:
+    event_times (np.ndarray): A sorted 1D array of event timestamps.
+    target_times (np.ndarray): A 1D array of target timestamps to search from.
+
+    Returns:
+    np.ndarray: An array of the same shape as target_times, containing the timestamp
+                of the first corresponding event. If no event is found after a
+                target time, the value is np.nan.
+    """
+    # Find the insertion indices for each target time in the event_times array.
+    # This gives us the index of the first event >= the target time.
+    indices = np.searchsorted(event_times, target_times, side='left')
+
+    # Create an output array filled with NaNs by default.
+    result_times = np.full(target_times.shape, np.nan)
+
+    # Identify valid indices (i.e., not pointing past the end of event_times).
+    valid_mask = indices < len(event_times)
+
+    # For valid indices, get the corresponding event time from the original array.
+    result_times[valid_mask] = event_times[indices[valid_mask]]
+
+    return result_times

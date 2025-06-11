@@ -92,6 +92,7 @@ class BaseExtractor(abc.ABC):
             file_paths = path_out.joinpath(self.save_names)
             _write_to_disk(file_paths, data)
         else:  # Should be list or tuple...
+            print(self.save_names)
             assert len(data) == len(self.save_names)
             file_paths = []
             for data, fn in zip(data, self.save_names):
@@ -222,6 +223,7 @@ def get_task_extractor_type(task_name):
         task_type = next((task_types[tt] for tt in task_types if tt in task_name), None)
     if task_type is None:
         _logger.warning(f"No extractor type found for {task_name}")
+        return task_name
     return task_type
 
 

@@ -1,6 +1,9 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+from scipy.ndimage import affine_transform
+from skimage import transform
 def plot_mean_psth(mean_psth, frame_rate, title, ax, vmin=None, vmax=None):
     
     num_frames_extracted = mean_psth.shape[1]
@@ -20,7 +23,7 @@ def plot_mean_psth(mean_psth, frame_rate, title, ax, vmin=None, vmax=None):
     ax.set_ylabel('Cell Index')
     ax.set_title(f'{title}')
 
-def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='blue', ymin=None, ymax=None):
+def plot_with_error_shading(data, time_points=None, ax=None, title=None, label=None, color='blue', ymin=None, ymax=None):
     """
     Plot the average response across trials with shaded standard error.
 
@@ -45,13 +48,13 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='
         time_points = np.arange(data.shape[1])
 
     # Plot the mean response
-    ax.plot(time_points, mean_response, color=color, label='Mean Response')
+    ax.plot(time_points, mean_response, color=color, label=label)
 
     # Shade the standard error
-    ax.fill_between(time_points, mean_response - std_error, mean_response + std_error, color=color, alpha=0.3, label='Standard Error')
+    ax.fill_between(time_points, mean_response - std_error, mean_response + std_error, color=color, alpha=0.3)
 
     # Set labels and title
-    ax.set_xlabel('Time')
+    ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Response')
     if title is not None:
         ax.set_title(title)
@@ -63,7 +66,7 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, color='
     # Remove top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-
+    ax.legend()
     # Add grid lines
     #ax.grid(True)
 
@@ -203,3 +206,109 @@ def plot_aligned_traces(traces, plot_indices, labels, event_arrays=None, event_l
 
     plt.tight_layout()
     plt.show()
+
+
+
+def create_angled_slice(brain_volume, pitch_angle=0, roll_angle=0, slice_height=None):
+    """
+    Extract an angled 2D slice from a 3D brain volume.
+    
+    Parameters:
+    -----------
+    brain_volume : 3D numpy array
+        The 3D brain atlas with dimensions [AP, DV, LR]
+        (anterior-posterior, dorsal-ventral, left-right)
+    pitch_angle : float
+        Rotation angle in degrees around the left-right axis
+        Positive values tilt the slice downward at the anterior end (nose down)
+    roll_angle : float
+        Rotation angle in degrees around the anterior-posterior axis
+        Positive values raise the right side and lower the left side of the slice
+    slice_height : int or None
+        The dorsal-ventral position to take the slice at.
+        If None, the middle of the brain is used.
+        
+    Returns:
+    --------
+    2D numpy array
+        The extracted angled slice
+    """
+    # Get brain dimensions
+    ap_size, dv_size, lr_size = brain_volume.shape
+    
+    # Default to middle slice if not specified
+    if slice_height is None:
+        slice_height = dv_size // 2
+    
+    # Convert angles to radians
+    pitch_rad = np.radians(pitch_angle)
+    roll_rad = np.radians(roll_angle)
+    
+    # Create rotation matrices for each axis
+    # Pitch: Rotation around LR axis (nose up/down)
+    # [AP, DV, LR] corresponds to [y, z, x] in standard coordinates
+    pitch_matrix = np.array([
+        [np.cos(pitch_rad), -np.sin(pitch_rad), 0],  # Affects AP and DV
+        [np.sin(pitch_rad), np.cos(pitch_rad), 0],
+        [0, 0, 1]
+    ])
+    
+    # Roll: Rotation around AP axis (tilting left/right sides up/down)
+    roll_matrix = np.array([
+        [1, 0, 0],
+        [0, np.cos(roll_rad), -np.sin(roll_rad)],  # Affects DV and LR
+        [0, np.sin(roll_rad), np.cos(roll_rad)]
+    ])
+    
+    # Combine rotations - first pitch, then roll
+    rotation = pitch_matrix @ roll_matrix
+    
+    # Center points for transformation
+    center_ap = ap_size // 2
+    center_dv = dv_size // 2
+    center_lr = lr_size // 2
+    
+    # Create meshgrid for the target 2D slice
+    y, x = np.mgrid[:ap_size, :lr_size]
+    z = np.ones_like(y) * slice_height
+    
+    # Stack coordinates
+    coords = np.stack([y, z, x], axis=-1)
+    
+    # Adjust coordinates to be centered at origin
+    coords = coords - np.array([center_ap, center_dv, center_lr])
+    
+    # Apply rotation
+    rotated_coords = np.zeros_like(coords)
+    for i in range(coords.shape[0]):
+        for j in range(coords.shape[1]):
+            rotated_coords[i, j] = rotation @ coords[i, j]
+    
+    # Move back to original coordinate system
+    rotated_coords = rotated_coords + np.array([center_ap, center_dv, center_lr])
+    
+    # Extract coordinates for each dimension
+    y_coords = rotated_coords[..., 0]
+    z_coords = rotated_coords[..., 1]
+    x_coords = rotated_coords[..., 2]
+    
+    # Create interpolator
+    def map_coordinates(volume, coords):
+        y_coords, z_coords, x_coords = coords
+        # Clip coordinates to stay within bounds
+        y_clipped = np.clip(y_coords, 0, volume.shape[0] - 1)
+        z_clipped = np.clip(z_coords, 0, volume.shape[1] - 1)
+        x_clipped = np.clip(x_coords, 0, volume.shape[2] - 1)
+        
+        # Convert to integers for indexing
+        y_idx = np.round(y_clipped).astype(int)
+        z_idx = np.round(z_clipped).astype(int)
+        x_idx = np.round(x_clipped).astype(int)
+        
+        # Return values from volume
+        return volume[y_idx, z_idx, x_idx]
+    
+    # Sample the volume at the rotated coordinates
+    angled_slice = map_coordinates(brain_volume, (y_coords, z_coords, x_coords))
+    
+    return angled_slice

@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import tifffile
 from scipy.signal import butter, filtfilt
 
+from scipy.ndimage import percentile_filter
+
 def find_frame_indices(dataframe, frame_rate, time_window, column_keyword):
     # Step 1: Identify the correct column
     for col in dataframe.columns:
@@ -103,10 +105,10 @@ def load_tiff(filepath):
 def calculate_dff_with_moving_median(ca_imaging_data, frame_rate):
     # ca_imaging_data is a 2D NumPy array with shape (num_cells, frames)
     # frame_rate is the number of frames per second
-    # Shift all fluorescence values to ensure they are above zero
+    # Shift all fluoescence values to ensure they are above zero
     min_fluo = np.min(ca_imaging_data)
     if min_fluo <= 0:
-        ca_imaging_data += (-min_fluo + 0.1)  # Shift fluorescence to slightly above zero
+        ca_imaging_data += (-min_fluo + 0.1)  # Shift fluoescence to slightly above zero
 
     window_size = int(20 * frame_rate)  # 20 seconds window
     num_cells, frames = ca_imaging_data.shape
@@ -130,10 +132,10 @@ def calculate_dff_with_moving_median(ca_imaging_data, frame_rate):
 
 def calculate_dff_with_percentile(ca_imaging_data, percentile):
     # ca_imaging_data is a 2D NumPy array with shape (cell#, frames)
-    # Shift all fluorescence values to ensure they are above zero
+    # Shift all fluoescence values to ensure they are above zero
     min_fluo = np.min(ca_imaging_data, axis=1, keepdims=True)
     if np.any(min_fluo <= 0):
-        ca_imaging_data += (-min_fluo + 0.1)  # Shift fluorescence to slightly above zero
+        ca_imaging_data += (-min_fluo + 0.1)  # Shift fluoescence to slightly above zero
 
     # Calculate baseline using the specified percentile
     baseline = np.percentile(ca_imaging_data, percentile, axis=1, keepdims=True)
@@ -175,7 +177,53 @@ def calculate_dff_with_moving_percentile(ca_imaging_data, frame_rate, moving_win
 
     return dff
 
-
+def calculate_dff_with_moving_percentile_vectorized(ca_imaging_data, frame_rate, moving_window=30, percentile=15):
+    """
+    Vectorized version of calculate_dff_with_moving_percentile using scipy.ndimage.percentile_filter
+    for much faster performance.
+    
+    Parameters:
+    ca_imaging_data (np.ndarray): 2D array of calcium traces with shape (num_cells, num_frames).
+    frame_rate (float): The frame rate (sampling frequency) of the data (in Hz).
+    moving_window (float): Window size in seconds for percentile calculation.
+    percentile (float): Percentile value to use as baseline (0-100).
+    
+    Returns:
+    np.ndarray: dF/F values with same shape as input.
+    """
+    num_cells, num_frames = ca_imaging_data.shape
+    
+    # Shift all fluorescence values to ensure they are above zero
+    min_fluo = np.min(ca_imaging_data)
+    if min_fluo <= 0:
+        ca_imaging_data = ca_imaging_data + (-min_fluo + 0.1)  # Shift fluorescence to slightly above zero
+    
+    # Calculate the window length in frames (ensure it's odd for centered window)
+    window_length = int(frame_rate * moving_window)
+    if window_length % 2 == 0:
+        window_length += 1
+    
+    # Pad data to handle edge effects
+    pad_width = window_length // 2
+    padded_data = np.pad(ca_imaging_data, ((0, 0), (pad_width, pad_width)), mode='reflect')
+    
+    # Calculate the moving percentile for all cells using percentile_filter
+    percentile_filtered = np.zeros_like(ca_imaging_data)
+    for cell in range(num_cells):
+        percentile_filtered[cell] = percentile_filter(
+            padded_data[cell], 
+            percentile=percentile, 
+            size=window_length,
+            mode='constant'
+        )[pad_width:pad_width+num_frames]  # Remove padding
+    
+    # Handle zero or very small baselines to prevent division issues
+    percentile_filtered[percentile_filtered < 1e-6] = 1e-6
+    
+    # Calculate dF/F in one vectorized operation
+    dff = (ca_imaging_data - percentile_filtered) / percentile_filtered
+    
+    return dff
 
 def butter_filter(data, cutoff, fs, filter_type='low', order=5):
     """
@@ -202,4 +250,142 @@ def butter_filter(data, cutoff, fs, filter_type='low', order=5):
     filtered_data = filtfilt(b, a, data, axis=1)
     
     return filtered_data
+
+def calculate_zstack_fluo(neuron_stats, zstack_mean):
+    """
+    Calculates the mean fluorescence of each neuron in each z-plane.
+
+    Parameters:
+    neuron_stats (list of dict): A list where each dict contains neuron information,
+                                 including 'xpix' and 'ypix' for pixel coordinates.
+    zstack_mean (np.ndarray): A 3D array of shape (num_planes, num_ypixels_image, num_xpixels_image)
+                              representing the mean image of each z-plane.
+
+    Returns:
+    np.ndarray: An array of shape (num_neurons, num_planes) containing the mean
+                fluorescence of each neuron in each z-plane.
+    """
+    num_neurons = len(neuron_stats)
+    num_planes = zstack_mean.shape[0]
+
+    zstack_fluo = np.zeros((num_neurons, num_planes))
+
+    for i in range(num_neurons):
+        neuron_ypix = neuron_stats[i]['ypix'] # y-coordinates are typically rows
+        neuron_xpix = neuron_stats[i]['xpix'] # x-coordinates are typically columns
+
+        for j in range(num_planes):
+            plane_image = zstack_mean[j, :, :] 
+            # Extract fluorescence values for the neuron's pixels in the current plane
+            # Ensure coordinates are within image bounds
+            # Note: In image indexing, y comes before x: image[y, x]
+            neuron_pixel_fluorescence = plane_image[neuron_ypix, neuron_xpix]
+            
+            # Calculate the mean fluorescence for the neuron in this plane
+            if neuron_pixel_fluorescence.size > 0:
+                zstack_fluo[i, j] = np.mean(neuron_pixel_fluorescence)
+            else:
+                zstack_fluo[i, j] = np.nan # Or 0, if preferred for empty pixel sets
+                
+    return zstack_fluo
+
+
+def calculate_integrated_zshift_dff_vectorized(raw_fluo, zstack_fluo, frame_zplanes, frame_rate, temporal_window=30, percentile=15):
+    """
+    Vectorized calculation of dF/F with integrated z-shift correction and temporal baseline.
+    
+    Parameters:
+    raw_fluo: array of shape (num_cells, num_frames) - Raw fluoescence values
+    zstack_fluo: array of shape (num_cells, num_zplanes) - Baseline fluoescence at each z-plane
+    frame_zplanes: array of shape (num_frames,) - Z-plane index for each frame
+    frame_rate: Imaging frame rate (Hz)
+    temporal_window: Window size in seconds for temporal baseline calculation
+    percentile: Percentile for temporal baseline calculation
+    
+    Returns:
+    final_dff: dF/F values corrected for z-shift and temporal baseline
+    """
+    num_cells, num_frames = raw_fluo.shape
+    
+    # Step 1: Create a reference z-plane baseline for each cell (using middle z-plane)
+    mid_zplane = zstack_fluo.shape[1] // 2
+    reference_baseline = zstack_fluo[:, mid_zplane].reshape(-1, 1)  # Shape: (num_cells, 1)
+    
+    # Step 2: Calculate z-plane correction factors for all frames at once
+    # Extract baseline values for each cell at each frame's z-plane
+    frame_baselines = zstack_fluo[:, frame_zplanes]  # Shape: (num_cells, num_frames)
+    
+    # Calculate correction factors (ratio of each frame's z-plane baseline to reference baseline)
+    z_correction_factors = frame_baselines / reference_baseline  # Broadcasting handles this
+    
+    # Handle division by zero or very small values
+    z_correction_factors[~np.isfinite(z_correction_factors) | (z_correction_factors < 1e-6)] = 1.0
+    
+    # Step 3: Apply z-correction to raw fluoescence
+    z_corrected_fluo = raw_fluo / z_correction_factors
+    
+    # Step 4: Calculate temporal baseline using sliding window
+    window_size_frames = int(frame_rate * temporal_window)
+    
+    # Calculate temporal baseline using percentile filter (much faster than looping)
+    # Pad the data to handle edge effects
+    pad_width = window_size_frames // 2
+    padded_data = np.pad(z_corrected_fluo, ((0, 0), (pad_width, pad_width)), mode='reflect')
+    
+    # Apply percentile filter to each cell's time series
+    temp_baseline = np.zeros_like(z_corrected_fluo)
+    for cell in range(num_cells):
+        # Use percentile filter for each cell (scipy's percentile_filter is faster than manual window)
+        temp_baseline[cell] = percentile_filter(
+            padded_data[cell], 
+            percentile=percentile, 
+            size=window_size_frames,
+            mode='constant'
+        )[pad_width:pad_width+num_frames]  # Remove padding
+    
+    # Ensure no zero baselines
+    temp_baseline[temp_baseline <= 0] = 0.1
+    
+    # Step 5: Calculate final dF/F
+    final_dff = (z_corrected_fluo - temp_baseline) / temp_baseline
+    
+    return final_dff
+
+
+
+def calculate_zshift_corrected_fluo(raw_fluo, zstack_fluo, frame_zplanes):
+    """
+    Vectorized calculation of dF/F with integrated z-shift correction and temporal baseline.
+    
+    Parameters:
+    raw_fluo: array of shape (num_cells, num_frames) - Raw fluoescence values
+    zstack_fluo: array of shape (num_cells, num_zplanes) - Baseline fluoescence at each z-plane
+    frame_zplanes: array of shape (num_frames,) - Z-plane index for each frame
+    frame_rate: Imaging frame rate (Hz)
+    temporal_window: Window size in seconds for temporal baseline calculation
+    percentile: Percentile for temporal baseline calculation
+    
+    Returns:
+    final_dff: dF/F values corrected for z-shift and temporal baseline
+    """
+    num_cells, num_frames = raw_fluo.shape
+    
+    # Step 1: Create a reference z-plane baseline for each cell (using middle z-plane)
+    mid_zplane = zstack_fluo.shape[1] // 2
+    reference_baseline = zstack_fluo[:, mid_zplane].reshape(-1, 1)  # Shape: (num_cells, 1)
+    
+    # Step 2: Calculate z-plane correction factors for all frames at once
+    # Extract baseline values for each cell at each frame's z-plane
+    frame_baselines = zstack_fluo[:, frame_zplanes]  # Shape: (num_cells, num_frames)
+    
+    # Calculate correction factors (ratio of each frame's z-plane baseline to reference baseline)
+    z_correction_factors = frame_baselines / reference_baseline  # Broadcasting handles this
+    
+    # Handle division by zero or very small values
+    z_correction_factors[~np.isfinite(z_correction_factors) | (z_correction_factors < 1e-6)] = 1.0
+    
+    # Step 3: Apply z-correction to raw fluoescence
+    z_corrected_fluo = raw_fluo / z_correction_factors
+
+    return z_corrected_fluo
 

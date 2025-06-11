@@ -6,7 +6,7 @@ import logging
 from collections import OrderedDict
 
 from pkg_resources import parse_version
-from ibllib.io.extractors import habituation_trials, training_trials, training_alt_trials, biased_trials, opto_trials
+from ibllib.io.extractors import habituation_trials, training_trials, training_alt_trials, biased_trials, opto_trials, vismapping_trials
 import ibllib.io.extractors.base
 import ibllib.io.raw_data_loaders as rawio
 
@@ -30,7 +30,7 @@ def extract_all(session_path, save=True, bpod_trials=None, settings=None, task_c
     bpod_trials = bpod_trials or rawio.load_data(session_path, task_collection=task_collection)
     settings = settings or rawio.load_settings(session_path, task_collection=task_collection)
     _logger.info(f'{extractor_type} session on {settings["PYBPOD_BOARD"]}')
-
+    print(extractor_type)
     # Determine which additional extractors are required
     extra = []
     if extractor_type == 'ephys':  # Should exclude 'ephys_biased'
@@ -55,6 +55,11 @@ def extract_all(session_path, save=True, bpod_trials=None, settings=None, task_c
         # files_trials should contain wheel files at the end.
         files_wheel = []
         wheel = OrderedDict({k: trials.pop(k) for k in tuple(trials.keys()) if 'wheel' in k})
+    elif  'VisMapping' in extractor_type:
+        trials, files_trials = vismapping_trials.extract_all(session_path, bpod_trials=bpod_trials, settings=settings, save=save,
+                                                              task_collection=task_collection, save_path=save_path)
+        wheel = None
+        files_wheel = []
     elif 'biased' in extractor_type or 'ephys' in extractor_type:
         trials, files_trials = biased_trials.extract_all(
             session_path, bpod_trials=bpod_trials, settings=settings, save=save, extra_classes=extra,

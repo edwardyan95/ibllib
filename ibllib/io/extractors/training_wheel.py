@@ -398,10 +398,14 @@ class Wheel(BaseBpodTrialsExtractor):
         from ibllib.io.extractors import training_trials  # Avoids circular imports
         goCue_times, _ = training_trials.GoCueTimes(self.session_path).extract(
             save=False, bpod_trials=self.bpod_trials, settings=self.settings, task_collection=self.task_collection)
+        # goCue_times, _ = training_trials.StimOnTimes_deprecated(self.session_path).extract(
+        #     save=False, bpod_trials=self.bpod_trials, settings=self.settings, task_collection=self.task_collection)
+        #print(goCue_times)
         feedback_times, _ = training_trials.FeedbackTimes(self.session_path).extract(
             save=False, bpod_trials=self.bpod_trials, settings=self.settings, task_collection=self.task_collection)
         trials = {'goCue_times': goCue_times, 'feedback_times': feedback_times}
         min_qt = self.settings.get('QUIESCENT_PERIOD', None)
+        #min_qt = 0
 
         first_moves, is_final, _ = extract_first_movement_times(moves, trials, min_qt=min_qt)
         output = (ts, pos, moves['intervals'], moves['peakAmplitude'],
