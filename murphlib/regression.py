@@ -650,7 +650,123 @@ def encoding_model_with_significance_cv(
         negative_RSS_diff_counts
     )
 
-
+def encoding_model_cv_with_reconstruction(
+    F, 
+    design_matrix, 
+    regression_type='linear', 
+    alpha=1.0,
+    n_splits=5,
+    n_jobs=-1
+):
+    """
+    Simplified encoding model with cross-validated reconstruction.
+    
+    Parameters:
+    -----------
+    F : array, shape (num_neurons, T)
+        Neural activity data
+    design_matrix : array, shape (T, num_predictors)
+        Design matrix with predictors
+    regression_type : str
+        Type of regression ('linear', 'ridge', 'lasso')
+    alpha : float
+        Regularization parameter for ridge/lasso
+    n_splits : int
+        Number of cross-validation folds
+    n_jobs : int
+        Number of parallel jobs
+        
+    Returns:
+    --------
+    beta_matrix : array, shape (num_neurons, num_predictors)
+        Beta coefficients from full model
+    intercepts : array, shape (num_neurons,)
+        Intercepts from full model
+    explained_variances : array, shape (num_neurons,)
+        Cross-validated explained variance for each neuron
+    reconstructed_activity : array, shape (num_neurons, T)
+        Cross-validated reconstructed neural activity
+    original_activity_cv : array, shape (num_neurons, T)
+        Original neural activity at cross-validated indices (same indices as reconstructed)
+    cv_indices : array, shape (T,)
+        Boolean array indicating which time points were used for cross-validation
+    """
+    from sklearn.model_selection import KFold
+    from sklearn.linear_model import LinearRegression, Ridge, MultiTaskLasso
+    from sklearn.metrics import r2_score
+    
+    num_neurons, T = F.shape
+    num_predictors = design_matrix.shape[1]
+    
+    # Initialize arrays
+    beta_matrix = np.zeros((num_neurons, num_predictors))
+    intercepts = np.zeros(num_neurons)
+    explained_variances = np.zeros(num_neurons)
+    reconstructed_activity = np.zeros((num_neurons, T))
+    original_activity_cv = np.zeros((num_neurons, T))
+    cv_indices = np.zeros(T, dtype=bool)  # Track which indices were used for CV
+    
+    # Initialize with NaN
+    reconstructed_activity[:] = np.nan
+    original_activity_cv[:] = np.nan
+    
+    # Cross-validation setup
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    # Choose regression model type
+    if regression_type == 'linear':
+        RegModel = lambda: LinearRegression(fit_intercept=True)
+    elif regression_type == 'ridge':
+        RegModel = lambda: Ridge(alpha=alpha, fit_intercept=True)
+    elif regression_type == 'lasso':
+        RegModel = lambda: MultiTaskLasso(alpha=alpha, fit_intercept=True)
+    else:
+        raise ValueError("Invalid regression type. Choose 'linear', 'lasso', or 'ridge'.")
+    
+    # Fit full model on entire dataset to get final beta coefficients and intercepts
+    full_model = RegModel()
+    full_model.fit(design_matrix, F.T)
+    beta_matrix = full_model.coef_
+    intercepts = full_model.intercept_
+    
+    # Cross-validated reconstruction and explained variance calculation
+    for train_idx, test_idx in kf.split(design_matrix):
+        # Split data
+        X_train, X_test = design_matrix[train_idx], design_matrix[test_idx]
+        y_train, y_test = F[:, train_idx].T, F[:, test_idx].T
+        
+        # Fit model on training data
+        cv_model = RegModel()
+        cv_model.fit(X_train, y_train)
+        
+        # Predict on test data
+        y_pred = cv_model.predict(X_test)
+        
+        # Store predictions and original activity at test indices
+        reconstructed_activity[:, test_idx] = y_pred.T
+        original_activity_cv[:, test_idx] = F[:, test_idx]
+        cv_indices[test_idx] = True
+    
+    # Calculate cross-validated explained variance for each neuron
+    for n in range(num_neurons):
+        # Use only the cross-validated indices
+        valid_idx = cv_indices
+        if np.sum(valid_idx) > 0:
+            explained_variances[n] = r2_score(
+                original_activity_cv[n, valid_idx], 
+                reconstructed_activity[n, valid_idx]
+            )
+        else:
+            explained_variances[n] = 0.0
+    
+    return (
+        beta_matrix,
+        intercepts,
+        explained_variances,
+        reconstructed_activity,
+        original_activity_cv,
+        cv_indices
+    )
 
 
 

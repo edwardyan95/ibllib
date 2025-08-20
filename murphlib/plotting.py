@@ -51,7 +51,7 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, label=N
     ax.plot(time_points, mean_response, color=color, label=label)
 
     # Shade the standard error
-    ax.fill_between(time_points, mean_response - std_error, mean_response + std_error, color=color, alpha=0.3)
+    ax.fill_between(time_points, mean_response - std_error, mean_response + std_error, color=color, alpha=0.3, label='_nolegend_')
 
     # Set labels and title
     ax.set_xlabel('Time (ms)')
