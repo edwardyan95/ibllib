@@ -23,7 +23,7 @@ def plot_mean_psth(mean_psth, frame_rate, title, ax, vmin=None, vmax=None):
     ax.set_ylabel('Cell Index')
     ax.set_title(f'{title}')
 
-def plot_with_error_shading(data, time_points=None, ax=None, title=None, label=None, color='blue', ymin=None, ymax=None):
+def plot_with_error_shading(data, time_points=None, ax=None, title=None, label=None, color='blue', ymin=None, ymax=None, show_trials=False):
     """
     Plot the average response across trials with shaded standard error.
 
@@ -33,6 +33,7 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, label=N
     - title (str, optional): Title for the plot. If None, no title will be set.
     - ymin (float, optional): Minimum value for the y-axis. If None, it will be determined automatically.
     - ymax (float, optional): Maximum value for the y-axis. If None, it will be determined automatically.
+    - show_trials (bool, optional): If True, plot individual trials as thin gray lines. Default is False.
     """
     if ax is None:
         fig, ax = plt.subplots()
@@ -46,6 +47,11 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, label=N
     # Time points
     if time_points is None:
         time_points = np.arange(data.shape[1])
+
+    # Plot individual trials if requested
+    if show_trials:
+        for trial in range(data.shape[0]):
+            ax.plot(time_points, data[trial, :], color='gray', alpha=0.3, linewidth=0.5, label='_nolegend_')
 
     # Plot the mean response
     ax.plot(time_points, mean_response, color=color, label=label)

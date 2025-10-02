@@ -10,7 +10,7 @@ import ibllib.io.raw_data_loaders as raw
 from ibllib.misc import structarr
 import ibllib.exceptions as err
 import brainbox.behavior.wheel as wh
-
+import scipy.signal 
 _logger = logging.getLogger(__name__)
 WHEEL_RADIUS_CM = 1  # we want the output in radians
 THRESHOLD_RAD_PER_SEC = 10
@@ -368,6 +368,115 @@ def extract_first_movement_times(wheel_moves, trials, min_qt=None):
         _logger.warning(f'no reliable goCue/Feedback times (both needed) for {cwarn} trials')
 
     return first_move_onsets, is_final_movement, ids[ids != -1]
+
+def extract_first_movement_times_visaudalt(wheel_moves, trials, min_qt=None, threshold=0.1):
+    """
+    Extracts the time of the first sufficiently large wheel movement for each trial.
+    To be counted, the movement must occur between go cue / stim on and before feedback /
+    response time.  The movement onset is sometimes just before the cue (occurring in the
+    gap between quiescence end and cue start, or during the quiescence period but sub-
+    threshold).  The movement is sufficiently large if it is greater than or equal to THRESH
+    :param wheel_moves: dictionary of detected wheel movement onsets and peak amplitudes for
+    use in extracting each trial's time of first movement.
+    :param trials: dictionary of trial data
+    :param min_qt: the minimum quiescence period, if None a default is used
+    :return: numpy array of first movement times, bool array indicating whether movement
+    crossed response threshold, and array of indices for wheel_moves arrays
+    """
+    THRESH = threshold  # peak amp should be at least .1 rad; ~1/3rd of the distance to threshold
+    MIN_QT = .0  # default minimum enforced quiescence period
+
+    # Determine minimum quiescent period
+    if min_qt is None:
+        min_qt = MIN_QT
+        _logger.info('minimum quiescent period assumed to be %.0fms', MIN_QT * 1e3)
+    elif isinstance(min_qt, Sized) and len(min_qt) > len(trials['stimOnTrigger_times']):
+        min_qt = np.array(min_qt[0:trials['stimOnTrigger_times'].size])
+
+    # Initialize as nans
+    first_move_onsets = np.full(trials['stimOnTrigger_times'].shape, np.nan)
+    ids = np.full(trials['stimOnTrigger_times'].shape, int(-1))
+    is_final_movement = np.zeros(trials['stimOnTrigger_times'].shape, bool)
+    flinch = abs(wheel_moves['peakAmplitude']) < THRESH
+    all_move_onsets = wheel_moves['intervals'][:, 0]
+    # Iterate over trials, extracting onsets approx. within closed-loop period
+    cwarn = 0
+    for i, (t1, t2) in enumerate(zip(trials['stimOnTrigger_times'] - min_qt,
+                                     trials['feedback_times'])):
+        if ~np.isnan(t2 - t1):  # If both timestamps defined
+            mask = (all_move_onsets > t1) & (all_move_onsets < t2)
+            if np.any(mask):  # If any onsets for this trial
+                trial_onset_ids, = np.where(mask)
+                if np.any(~flinch[mask]):  # If any trial moves were sufficiently large
+                    ids[i] = trial_onset_ids[~flinch[mask]][0]  # Find first large move id
+                    first_move_onsets[i] = all_move_onsets[ids[i]]  # Save first large onset
+                    is_final_movement[i] = ids[i] == trial_onset_ids[-1]  # Final move of trial
+        else:  # Log missing timestamps
+            cwarn += 1
+    if cwarn:
+        _logger.warning(f'no reliable stimOnTrigger/Feedback times (both needed) for {cwarn} trials')
+
+    return first_move_onsets, is_final_movement, ids[ids != -1]
+
+def extract_last_movement_times_visaudalt(wheel_moves, trials, min_qt=None, threshold=0.1):
+    """
+    Extracts the time of the first sufficiently large wheel movement for each trial.
+    To be counted, the movement must occur between go cue / stim on and before feedback /
+    response time.  The movement onset is sometimes just before the cue (occurring in the
+    gap between quiescence end and cue start, or during the quiescence period but sub-
+    threshold).  The movement is sufficiently large if it is greater than or equal to THRESH
+    :param wheel_moves: dictionary of detected wheel movement onsets and peak amplitudes for
+    use in extracting each trial's time of first movement.
+    :param trials: dictionary of trial data
+    :param min_qt: the minimum quiescence period, if None a default is used
+    :return: numpy array of first movement times, bool array indicating whether movement
+    crossed response threshold, and array of indices for wheel_moves arrays
+    """
+    THRESH = threshold  # peak amp should be at least .1 rad; ~1/3rd of the distance to threshold
+    MIN_QT = .0  # default minimum enforced quiescence period
+
+    # Determine minimum quiescent period
+    if min_qt is None:
+        min_qt = MIN_QT
+        _logger.info('minimum quiescent period assumed to be %.0fms', MIN_QT * 1e3)
+    elif isinstance(min_qt, Sized) and len(min_qt) > len(trials['stimOnTrigger_times']):
+        min_qt = np.array(min_qt[0:trials['stimOnTrigger_times'].size])
+
+    # Initialize as nans
+    last_move_onsets = np.full(trials['stimOnTrigger_times'].shape, np.nan)
+    ids = np.full(trials['stimOnTrigger_times'].shape, int(-1))
+    is_first_movement = np.zeros(trials['stimOnTrigger_times'].shape, bool)
+    flinch = abs(wheel_moves['peakAmplitude']) < THRESH
+    all_move_onsets = wheel_moves['intervals'][:, 0]
+    # Iterate over trials, extracting onsets approx. within closed-loop period
+    cwarn = 0
+    for i, (t1, t2) in enumerate(zip(trials['stimOnTrigger_times'] - min_qt,
+                                     trials['feedback_times'])):
+        if ~np.isnan(t2 - t1):  # If both timestamps defined
+            mask = (all_move_onsets > t1) & (all_move_onsets < t2)
+            if np.any(mask):  # If any onsets for this trial
+                trial_onset_ids, = np.where(mask)
+                if np.any(~flinch[mask]):  # If any trial moves were sufficiently large
+                    ids[i] = trial_onset_ids[~flinch[mask]][-1]  # Find first large move id
+                    last_move_onsets[i] = all_move_onsets[ids[i]]  # Save first large onset
+                    is_first_movement[i] = ids[i] == trial_onset_ids[0]  # Final move of trial
+        else:  # Log missing timestamps
+            cwarn += 1
+    if cwarn:
+        _logger.warning(f'no reliable stimOnTrigger/Feedback times (both needed) for {cwarn} trials')
+
+    return last_move_onsets, is_first_movement, ids[ids != -1]
+
+def extract_wheel_velocity(pos):
+    N = 10  # Number of points in the Gaussian
+    STDEV = 1.8  # Equivalent to a width factor (alpha value) of 2.5
+    gauss = scipy.signal.windows.gaussian(N, STDEV)  # A 10-point Gaussian window of a given s.d.
+    fs = 1000
+    fc = 10.0  # Hz  (try 15–30)
+    b, a = scipy.signal.butter(5, fc/(fs/2), btype='low')
+    pos_lp = scipy.signal.filtfilt(b, a, pos)
+    vel = scipy.signal.convolve(np.diff(np.insert(pos_lp, 0, 0)), gauss, mode='same')
+    return vel
 
 
 class Wheel(BaseBpodTrialsExtractor):

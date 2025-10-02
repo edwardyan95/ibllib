@@ -372,35 +372,48 @@ def calculate_zstack_fluo(neuron_stats, zstack_mean):
                 
     return zstack_fluo
 
-def detect_licking_events(motion_energy, threshold=2.0, distance=5):
+def detect_licking_events(motion_energy, threshold=2.0, distance=5, detect_negative=True):
     """
     Detects discrete licking events from a motion energy signal by finding peaks
     in the z-scored signal.
 
     This function first z-scores the motion energy signal, then identifies peaks
-    that are above a certain threshold (in standard deviations) and separated by a
+    that are above/below a certain threshold (in standard deviations) and separated by a
     minimum distance.
 
     Parameters:
     motion_energy (np.ndarray): 1D array representing motion energy over time.
     threshold (float): The z-score threshold for detecting a peak. Only peaks with
-                       a z-score higher than this value will be considered.
-                       Default is 2.0 (2 standard deviations above the mean).
+                       a z-score higher/lower than this value will be considered.
+                       Default is 2.0 (2 standard deviations above/below the mean).
     distance (int): The minimum required horizontal distance (in frames/samples)
                     between neighboring peaks. Default is 5 frames.
+    detect_negative (bool): Whether to also detect negative peaks. Default is True.
 
     Returns:
-    np.ndarray: An array of indices (timepoints/frames) where licking events are detected.
+    np.ndarray: An array of indices (timepoints/frames) where licking events are detected,
+                sorted in chronological order.
     """
+    
     # Z-score the motion energy signal
     z_scored_energy = (motion_energy - np.mean(motion_energy)) / np.std(motion_energy)
     
-    # find_peaks is well-suited for this task.
-    # 'height' parameter serves as our threshold on the z-scored signal.
-    # 'distance' ensures that we don't count the same lick multiple times.
-    lick_indices, _ = scipy.signal.find_peaks(z_scored_energy, height=threshold, distance=distance)
+    # Find positive peaks
+    positive_peaks, _ = scipy.signal.find_peaks(z_scored_energy, height=threshold, distance=distance)
     
-    return lick_indices
+    if detect_negative:
+        # Find negative peaks by inverting the signal and finding peaks
+        negative_peaks, _ = scipy.signal.find_peaks(-z_scored_energy, height=threshold, distance=distance)
+        
+        # Combine positive and negative peaks
+        all_peaks = np.concatenate([positive_peaks, negative_peaks])
+        
+        # Sort chronologically
+        all_peaks = np.sort(all_peaks)
+        
+        return all_peaks
+    else:
+        return positive_peaks
 
 def find_first_event_after(event_times, target_times):
     """
@@ -429,3 +442,79 @@ def find_first_event_after(event_times, target_times):
     result_times[valid_mask] = event_times[indices[valid_mask]]
 
     return result_times
+
+import math
+
+def grid_shape(n):
+    # rows*cols >= n and rows ≈ cols
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    return rows, cols
+
+def calculate_lick_rate(lick_times_behavior, video_frame_rate, bin_size_s=None, n_bins=None, total_duration_s=None, total_frames=None):
+    """
+    Convert lick frame times to lick rate (Hz) by binning.
+    
+    Parameters:
+    -----------
+    lick_times_behavior : array-like
+        Frame indices where lick events were detected
+    video_frame_rate : float
+        Frame rate of the behavior video (frames per second)
+    bin_size_s : float, optional
+        Size of each bin in seconds (mutually exclusive with n_bins)
+    n_bins : int, optional
+        Number of bins to create (mutually exclusive with bin_size_s)
+    total_duration_s : float, optional
+        Total duration of the session in seconds
+    total_frames : int, optional
+        Total number of frames in the video (alternative to total_duration_s)
+        
+    Returns:
+    --------
+    lick_rate : array
+        Lick rate in Hz for each time bin
+    bin_centers : array
+        Time points (in seconds) for the center of each bin
+    bin_edges : array
+        Time points (in seconds) for the edges of each bin
+    """
+    import numpy as np
+    
+    # Check that exactly one of bin_size_s or n_bins is provided
+    if (bin_size_s is None and n_bins is None) or (bin_size_s is not None and n_bins is not None):
+        raise ValueError("Must specify exactly one of 'bin_size_s' or 'n_bins'")
+    
+    # Convert lick frames to times in seconds
+    lick_times_s = np.array(lick_times_behavior) / video_frame_rate
+    
+    # Determine total duration
+    if total_duration_s is not None:
+        duration = total_duration_s
+    elif total_frames is not None:
+        duration = total_frames / video_frame_rate
+    else:
+        # Use the last lick time plus some buffer
+        if n_bins is not None:
+            duration = np.max(lick_times_s) * 1.1  # Add 10% buffer
+        else:
+            duration = np.max(lick_times_s) + bin_size_s
+    
+    # Create time bins
+    if n_bins is not None:
+        # Create specified number of bins
+        bin_edges = np.linspace(0, duration, n_bins + 1)
+        bin_size_s = duration / n_bins
+    else:
+        # Use specified bin size
+        bin_edges = np.arange(0, duration + bin_size_s, bin_size_s)
+    
+    bin_centers = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
+    
+    # Count licks in each bin
+    lick_counts, _ = np.histogram(lick_times_s, bins=bin_edges)
+    
+    # Convert counts to rate (Hz)
+    lick_rate = lick_counts / bin_size_s
+    
+    return lick_rate, bin_centers, bin_edges

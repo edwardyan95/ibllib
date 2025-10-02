@@ -80,11 +80,6 @@ def transform_trial_table(df, valve_silent = False, punish_silent = False):
 
     df_transformed.loc[np.isnan(df_transformed['omission']),'omission'] = 0
     
-    # Add 'leftchoice' column: 1 when 'choice' is -1, NaN otherwise
-    df_transformed['leftchoice'] = np.where(df_transformed['choice'] == -1, 1, 0)
-
-    # Add 'rightchoice' column: 1 when 'choice' is 1, NaN otherwise
-    df_transformed['rightchoice'] = np.where(df_transformed['choice'] == 1, 1, 0)
 
     # Add 'reward_times' column: 'feedback_times' where 'feedbackType' is 1, NaN otherwise
     if valve_silent:
@@ -128,6 +123,15 @@ def transform_trial_table(df, valve_silent = False, punish_silent = False):
     # Add 'aud_stimOn' column: 'stimOnTrigger_times' where 'modality' is 1, NaN otherwise
     df_transformed['left_aud_stimOn_times'] = np.where(df_transformed['contrastLeft'] == 0.0, df_transformed['aud_stimOn_times'], np.nan)
     df_transformed['right_aud_stimOn_times'] = np.where(df_transformed['contrastRight'] == 0.0, df_transformed['aud_stimOn_times'], np.nan)
+
+    # df_transformed['vis_left_choice_times'] = np.where((df_transformed['choice'] == -1) & (df_transformed['modality'] == 0), df_transformed['firstMovement_times']-0.2*15, np.nan)
+    # df_transformed['vis_right_choice_times'] = np.where((df_transformed['choice'] == 1) & (df_transformed['modality'] == 0), df_transformed['firstMovement_times']-0.2*15, np.nan)
+    # df_transformed['aud_left_choice_times'] = np.where((df_transformed['choice'] == -1) & (df_transformed['modality'] == 1), df_transformed['firstMovement_times']-0.2*15, np.nan)
+    # df_transformed['aud_right_choice_times'] = np.where((df_transformed['choice'] == 1) & (df_transformed['modality'] == 1), df_transformed['firstMovement_times']-0.2*15, np.nan)
+    df_transformed['vis_left_choice_times'] = np.where((df_transformed['choice'] == -1) & (df_transformed['modality'] == 0), df_transformed['lastMovement_times']-0.2*15, np.nan)
+    df_transformed['vis_right_choice_times'] = np.where((df_transformed['choice'] == 1) & (df_transformed['modality'] == 0), df_transformed['lastMovement_times']-0.2*15, np.nan)
+    df_transformed['aud_left_choice_times'] = np.where((df_transformed['choice'] == -1) & (df_transformed['modality'] == 1), df_transformed['lastMovement_times']-0.2*15, np.nan)
+    df_transformed['aud_right_choice_times'] = np.where((df_transformed['choice'] == 1) & (df_transformed['modality'] == 1), df_transformed['lastMovement_times']-0.2*15, np.nan)
 
     # Add 'previous_feedbackType' column
     previous_feedbackType = np.roll(np.array(df_transformed['feedbackType']),1)
