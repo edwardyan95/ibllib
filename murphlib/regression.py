@@ -3,6 +3,7 @@ import numpy as np
 from scipy import interpolate, stats
 from scipy.stats import zscore
 from sklearn.metrics import explained_variance_score
+from tqdm.auto import tqdm
 from sklearn.model_selection import KFold
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, MultiTaskLasso, MultiTaskElasticNet
 from joblib import Parallel, delayed
@@ -509,7 +510,8 @@ def encoding_model_with_significance_cv(
     n_bootstraps=100,
     unique_predictors=None, 
     full_predictors=None,
-    n_jobs=-1
+    n_jobs=-1,
+    show_progress=True
 ):
     """
     Encoding model analysis with cross-validated F-statistics and block bootstrap testing.
@@ -620,10 +622,14 @@ def encoding_model_with_significance_cv(
     # Perform parallel bootstrap iterations
     block_size = int(frame_rate)  # 1 second blocks
     
+    iterator = range(n_bootstraps)
+    if show_progress:
+        iterator = tqdm(iterator, desc='Bootstraps')
+    
     bootstrap_results = Parallel(n_jobs=n_jobs)(
         delayed(bootstrap_iteration)(
             i, F, design_matrix, kf, unique_predictors, full_predictors, RegModel, block_size
-        ) for i in range(n_bootstraps)
+        ) for i in iterator
     )
     
     # Unpack bootstrap results

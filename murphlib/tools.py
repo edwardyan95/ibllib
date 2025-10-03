@@ -6,6 +6,7 @@ import scipy.io
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score, calinski_harabasz_score
 import tifffile
+from pathlib import Path
 def find_tif_file(directory_path):
     # List all files in the directory
     files = os.listdir(directory_path)
@@ -518,3 +519,24 @@ def calculate_lick_rate(lick_times_behavior, video_frame_rate, bin_size_s=None, 
     lick_rate = lick_counts / bin_size_s
     
     return lick_rate, bin_centers, bin_edges
+
+def is_under(file_path, dir_path):
+    """
+    Check if file_path exists and is located under dir_path.
+    
+    Args:
+        file_path (str or Path): Path to file
+        dir_path (str or Path): Path to directory
+
+    Returns:
+        bool
+    """
+    file_path = Path(file_path).resolve()
+    dir_path = Path(dir_path).resolve()
+
+    try:
+        # Check both existence and ancestry
+        return file_path.exists() and dir_path in file_path.parents
+    except RuntimeError:
+        # In rare cases (bad symlinks, permissions), just fail safe
+        return False
