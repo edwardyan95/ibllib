@@ -8,6 +8,7 @@ from sklearn.model_selection import KFold
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, MultiTaskLasso, MultiTaskElasticNet
 from joblib import Parallel, delayed
 from multiprocessing import Pool
+import warnings
 def generate_event_windows(df, column_names, event_type):
     """
     Generates a list of NumPy arrays where 0 indicates no event and 1 indicates event occurrence in the specified window.
@@ -545,28 +546,8 @@ def encoding_model_with_significance_cv(
         raise ValueError("Invalid regression type. Choose 'linear', 'lasso', or 'ridge'.")
     
     # Check for collinearity using VIF
-    # def calculate_vif(X):
-    #     vif_stats = []
-    #     for i in range(X.shape[1]):
-    #         # Get R² from regressing feature i on all other features
-    #         other_cols = list(range(X.shape[1]))
-    #         other_cols.pop(i)
-            
-    #         reg = LinearRegression()
-    #         reg.fit(X[:, other_cols], X[:, i])
-    #         r2 = reg.score(X[:, other_cols], X[:, i])
-            
-    #         # Calculate VIF
-    #         vif = 1 / (1 - r2) if r2 != 1 else float('inf')
-    #         vif_stats.append(vif)
-    #     return np.array(vif_stats)
-    
-    # # Calculate VIF for each predictor
-    # vif_values = calculate_vif(design_matrix)
-    # high_vif_idx = np.where(vif_values > 5)[0]  # VIF > 5 indicates potential collinearity
-    # if len(high_vif_idx) > 0:
-    #     warnings.warn(f"High collinearity detected for predictors at indices {high_vif_idx} "
-    #                  f"with VIF values {vif_values[high_vif_idx]}")
+    _ = check_multicollinearity(design_matrix, full_predictors,
+                            vif_thresh=5.0, corr_thresh=0.90, cond_thresh=1e4, verbose=True)
     
     # Fit full model on entire dataset to get beta coefficients and intercepts
     full_model = RegModel()
@@ -836,3 +817,90 @@ def grid_search_encoding_model(F, design_matrix, param_grid, n_splits=5):
             best_params = {'regression_type': regression_type, 'alpha': alpha}
     
     return {'best_params': best_params, 'best_variance': best_variance}
+
+def _compute_vif(X):
+    # VIF for each column: regress col i on all others -> 1/(1-R^2)
+    n, p = X.shape
+    vifs = np.empty(p, dtype=float)
+    for i in range(p):
+        others = [j for j in range(p) if j != i]
+        Xi = X[:, others]
+        yi = X[:, i]
+        reg = LinearRegression()
+        reg.fit(Xi, yi)
+        r2 = reg.score(Xi, yi)
+        vifs[i] = np.inf if r2 >= 0.999999999 else 1.0 / max(1.0 - r2, 1e-12)
+    return vifs
+
+def check_multicollinearity(design_matrix, full_predictors,
+                            vif_thresh=5.0, corr_thresh=0.95,
+                            cond_thresh=1e4, verbose=True,
+                            ignore_substr="omission"):
+    """
+    Checks multicollinearity (VIF, pairwise correlation, duplicates, condition number).
+    Completely drops any predictors whose names contain `ignore_substr`.
+    """
+    import warnings
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
+
+    # --- filter out ignored predictors ---
+    mask = [ignore_substr.lower() not in name.lower() for name in full_predictors]
+    X = np.asarray(design_matrix)[:, mask]
+    names = [name for keep, name in zip(mask, full_predictors) if keep]
+
+    if X.shape[1] == 0:
+        if verbose:
+            warnings.warn(f"All predictors dropped due to '{ignore_substr}' filter.")
+        return {}
+
+    # --- standardize for stability ---
+    Xz = (X - X.mean(axis=0)) / (X.std(axis=0, ddof=1) + 1e-12)
+
+    # 1) VIF
+    vifs = []
+    for i in range(Xz.shape[1]):
+        others = [j for j in range(Xz.shape[1]) if j != i]
+        Xi = Xz[:, others]
+        yi = Xz[:, i]
+        reg = LinearRegression()
+        reg.fit(Xi, yi)
+        r2 = reg.score(Xi, yi)
+        vif = np.inf if r2 >= 0.999999999 else 1.0 / max(1.0 - r2, 1e-12)
+        vifs.append(vif)
+    vifs = np.array(vifs)
+
+    high_vif_idx = np.where(vifs > vif_thresh)[0]
+    if high_vif_idx.size and verbose:
+        for i in high_vif_idx:
+            warnings.warn(f"High VIF >{vif_thresh}: {names[i]} (VIF={vifs[i]:.2f})")
+
+    # 2) Pairwise correlation
+    corr = np.corrcoef(Xz, rowvar=False)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            r = corr[i, j]
+            if abs(r) >= corr_thresh and verbose:
+                warnings.warn(
+                    f"High correlation |r|={abs(r):.3f} ≥ {corr_thresh} "
+                    f"between {names[i]} ↔ {names[j]}"
+                )
+
+    # 3) Duplicates
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            if np.allclose(Xz[:, i], Xz[:, j], atol=1e-10, rtol=1e-10):
+                warnings.warn(f"Duplicate columns: {names[i]} ↔ {names[j]}")
+
+    # 4) Condition number
+    s = np.linalg.svd(Xz, full_matrices=False, compute_uv=False)
+    cond = s.max() / max(s.min(), 1e-15)
+    if cond > cond_thresh and verbose:
+        warnings.warn(f"Design matrix ill-conditioned: cond={cond:.2e} (> {cond_thresh})")
+
+    return {
+        "predictors_checked": names,
+        "vif": vifs,
+        "high_vif_idx": high_vif_idx,
+        "condition_number": cond,
+    }
