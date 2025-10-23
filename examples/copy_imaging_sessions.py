@@ -11,7 +11,8 @@ Copy selected mouse sessions from Cerebellum_Imaging while:
   - supporting a dry-run mode and disk-space pre-check.
 
 Usage:
-  python copy_cerebellum_sessions.py SRC_ROOT DEST_ROOT --mice M1,M2,... [--max-gb 5]
+  
+  python copy_imaging_sessions.py "Z:\TM_Lab\Edward\Cerebellum_Imaging\Pcp2-jgcamp8m" "I:\Cerebellum_imaging" --mice AF_R3,AF_L2
 """
 
 import argparse

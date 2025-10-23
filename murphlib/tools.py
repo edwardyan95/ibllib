@@ -262,7 +262,7 @@ def attach_reg_model_to_stat(stat, model):
         except:
             continue
         try:
-            s['bootstrap_p_value'] = model[i]['bootstrap_p_value']
+            s['bootstrap_p_value'] = holm_bonferroni_correction(model[i]['bootstrap_p_value'])
         except:
             continue
         try:

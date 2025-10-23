@@ -39,10 +39,10 @@ def plot_with_error_shading(data, time_points=None, ax=None, title=None, label=N
         fig, ax = plt.subplots()
 
     # Compute the average response across trials
-    mean_response = np.mean(data, axis=0)
+    mean_response = np.nanmean(data, axis=0)
 
     # Compute the standard error of the mean across trials
-    std_error = np.std(data, axis=0) / np.sqrt(data.shape[0])
+    std_error = np.nanstd(data, axis=0) / np.sqrt(data.shape[0])
 
     # Time points
     if time_points is None:
