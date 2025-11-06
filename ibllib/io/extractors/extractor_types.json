@@ -18,5 +18,6 @@
  "_trainingChoiceWorld": "training",
  "ephysMockChoiceWorld": "mock_ephys",
  "ephys_certification": "sync_ephys",
- "_trainingVisAudAlternate": "training_alt"
+ "_trainingVisAudAlternate": "training_alt",
+ "ks_pavlovian": "pavlovian"
 }

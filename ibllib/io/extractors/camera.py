@@ -8,8 +8,8 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from iblutil.util import range_str
-
-import neurodsp.utils as dsp
+import ibldsp.utils as dsp
+#import neurodsp.utils as dsp
 from ibllib.plots import squares, vertical_lines
 from ibllib.io.video import assert_valid_label, VideoStreamer
 from iblutil.numerical import within_ranges

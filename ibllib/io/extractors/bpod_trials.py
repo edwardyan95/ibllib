@@ -6,7 +6,7 @@ import logging
 from collections import OrderedDict
 
 from pkg_resources import parse_version
-from ibllib.io.extractors import habituation_trials, training_trials, training_alt_trials, biased_trials, opto_trials, vismapping_trials
+from ibllib.io.extractors import habituation_trials, training_trials, training_alt_trials, biased_trials, opto_trials, vismapping_trials, training_pav_trials
 import ibllib.io.extractors.base
 import ibllib.io.raw_data_loaders as rawio
 
@@ -76,6 +76,15 @@ def extract_all(session_path, save=True, bpod_trials=None, settings=None, task_c
                                                               task_collection=task_collection, save_path=save_path)
         wheel = None
         files_wheel = []
+
+    # Kiara's edits start here
+    elif 'pavlovian' in extractor_type:
+        trials, files_trials = training_pav_trials.extract_all(session_path, bpod_trials=bpod_trials, settings=settings, save=save,
+                                                            task_collection=task_collection, save_path=save_path)
+        wheel = None
+        files_wheel = []
+    # Kiara's edits end here
+
     else:
         raise ValueError(f"No extractor for task {extractor_type}")
     _logger.info('session extracted \n')  # timing info in log
