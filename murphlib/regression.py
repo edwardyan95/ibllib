@@ -650,6 +650,123 @@ def encoding_model_with_significance_cv(
         negative_RSS_diff_counts
     )
 
+def fix_encoding_model_cv_uev(
+    F, 
+    design_matrix, 
+    frame_rate,
+    regression_type='linear', 
+    alpha=1.0,  # renamed from alpha to avoid confusion
+    n_splits=5, 
+    unique_predictors=None, 
+    full_predictors=None,
+    n_jobs=-1
+):
+    """
+    fix cross validated uev
+    """
+    num_neurons, T = F.shape
+    num_predictors = design_matrix.shape[1]
+    num_unique_predictors = len(unique_predictors)
+
+    # Initialize arrays
+    beta_matrix = np.zeros((num_neurons, num_predictors))
+    intercepts = np.zeros(num_neurons)
+
+    # These will now store CROSS-VALIDATED EV and UEV
+    explained_variances_cv = np.zeros(num_neurons)
+    unique_explained_variances_cv = np.zeros((num_neurons, num_unique_predictors))
+
+    F_statistics = np.zeros((num_neurons, num_unique_predictors))
+    p_values = np.zeros((num_neurons, num_unique_predictors))
+    bootstrap_p_values = np.zeros((num_neurons, num_unique_predictors))
+
+    # Cross-validation setup
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+    # Choose regression model type
+    if regression_type == 'linear':
+        RegModel = lambda: LinearRegression(fit_intercept=True)
+    elif regression_type == 'ridge':
+        RegModel = lambda: Ridge(alpha=alpha, fit_intercept=True)
+    elif regression_type == 'lasso':
+        RegModel = lambda: MultiTaskLasso(alpha=alpha, fit_intercept=True)
+    else:
+        raise ValueError("Invalid regression type. Choose 'linear', 'lasso', or 'ridge'.")
+
+    # Check for collinearity using VIF
+    _ = check_multicollinearity(
+        design_matrix, full_predictors,
+        vif_thresh=5.0, corr_thresh=0.90, cond_thresh=1e4, verbose=True
+    )
+
+    # Fit full model on entire dataset to get beta coefficients and intercepts
+    full_model = RegModel()
+    full_model.fit(design_matrix, F.T)         # multi-output: shape (T, num_predictors) -> (T, num_neurons)
+    beta_matrix = full_model.coef_            # shape (num_neurons, num_predictors)
+    intercepts = full_model.intercept_        # shape (num_neurons,)
+
+    # --------- CROSS-VALIDATED EV AND UEV ---------
+
+    # Precompute which columns to remove for each unique predictor
+    columns_to_remove_list = []
+    for unique_name in unique_predictors:
+        cols = [i for i, name in enumerate(full_predictors) if unique_name in name]
+        columns_to_remove_list.append(cols)
+
+    # Accumulators for CV sums
+    RSS_full = np.zeros(num_neurons)                          # residual sum of squares for full model
+    TSS = np.zeros(num_neurons)                               # total sum of squares (using train mean)
+    RSS_reduced = np.zeros((num_neurons, num_unique_predictors))  # residuals for each reduced model
+
+    X = design_matrix  # (T, num_predictors)
+
+    for train_idx, test_idx in kf.split(X):
+        X_train = X[train_idx, :]
+        X_test = X[test_idx, :]
+
+        # y is (T, num_neurons) for sklearn, so transpose F
+        y_train = F[:, train_idx].T    # (len(train_idx), num_neurons)
+        y_test = F[:, test_idx].T      # (len(test_idx), num_neurons)
+
+        # Baseline: mean of training data per neuron
+        y_train_mean = np.mean(y_train, axis=0, keepdims=True)  # (1, num_neurons)
+
+        # Update total sum of squares (TSS) using train mean
+        TSS += np.sum((y_test - y_train_mean) ** 2, axis=0)
+
+        # ----- Full model -----
+        full_model_cv = RegModel()
+        full_model_cv.fit(X_train, y_train)
+        y_pred_full = full_model_cv.predict(X_test)  # (len(test_idx), num_neurons)
+
+        RSS_full += np.sum((y_test - y_pred_full) ** 2, axis=0)
+
+        # ----- Reduced models for each unique predictor -----
+        for u_idx, cols_to_remove in enumerate(columns_to_remove_list):
+            X_train_red = np.delete(X_train, cols_to_remove, axis=1)
+            X_test_red = np.delete(X_test, cols_to_remove, axis=1)
+
+            red_model = RegModel()
+            red_model.fit(X_train_red, y_train)
+            y_pred_red = red_model.predict(X_test_red)
+
+            RSS_reduced[:, u_idx] += np.sum((y_test - y_pred_red) ** 2, axis=0)
+
+    # Convert sums into CV R² and CV UEV
+    with np.errstate(divide='ignore', invalid='ignore'):
+        explained_variances_cv = 1.0 - (RSS_full / TSS)
+        for u_idx in range(num_unique_predictors):
+            unique_explained_variances_cv[:, u_idx] = (RSS_reduced[:, u_idx] - RSS_full) / TSS
+
+    # Handle neurons where TSS == 0 (e.g., flat signals)
+    explained_variances_cv[~np.isfinite(explained_variances_cv)] = np.nan
+    unique_explained_variances_cv[~np.isfinite(unique_explained_variances_cv)] = np.nan
+
+    return (
+        explained_variances_cv,
+        unique_explained_variances_cv
+    )
+
 def encoding_model_cv_with_reconstruction(
     F, 
     design_matrix, 
@@ -904,3 +1021,467 @@ def check_multicollinearity(design_matrix, full_predictors,
         "high_vif_idx": high_vif_idx,
         "condition_number": cond,
     }
+
+
+
+from scipy.linalg import eigh
+from sklearn.linear_model import ElasticNetCV
+
+# ---------- utilities ----------
+def explained_variance(y_true, y_pred):
+    resid = y_true - y_pred
+    denom = np.var(y_true)
+    return 0.0 if denom == 0 else 1.0 - (np.var(resid) / denom)
+
+def compute_rrr_basis(P, F, lam_rr=1e-2, r_max=None, method='ridge_svd'):
+    """
+    Compute reduced-rank regression basis.
+    
+    Methods:
+      'ridge_svd': SVD of ridge solution (current default, stable)
+      'classic': Classic RRR via SVD of OLS/ridge solution
+      'covariance': Maximize covariance between P*B and F (generalized eigenvalue)
+    
+    Shapes:
+      P: (T, Ppred), F: (T, Nneur)
+      B: (Ppred, r), PB: (T, r)
+    Returns B (predictor-space basis), PB (temporal basis), and singular values/eigenvalues.
+    """
+    T, Ppred = P.shape
+    _, Nneur = F.shape
+    if r_max is None:
+        r_max = min(Ppred, Nneur)
+
+    if method == 'ridge_svd':
+        # Current approach: Ridge → SVD → basis
+        PtP = P.T @ P
+        PtF = P.T @ F
+        PtP_reg = PtP + lam_rr * np.eye(Ppred, dtype=P.dtype)
+        W_ridge = np.linalg.solve(PtP_reg, PtF)  # (Ppred x Nneur)
+        U, s, Vt = np.linalg.svd(W_ridge, full_matrices=False)
+        r_eff = min(r_max, len(s))
+        B = U[:, :r_eff]
+        PB = P @ B
+        evals = s[:r_eff]
+        
+    elif method == 'classic':
+        # Classic RRR: Find rank-r approximation that minimizes ||F - P*W||²
+        # With ridge regularization for stability
+        PtP = P.T @ P
+        PtF = P.T @ F
+        PtP_reg = PtP + lam_rr * np.eye(Ppred, dtype=P.dtype)
+        
+        # Compute regularized predictor: P_reg = P @ (P'P + lam*I)^-1 P'
+        # This is equivalent to ridge regression followed by projection
+        W_ridge = np.linalg.solve(PtP_reg, PtF)
+        
+        # SVD of the cross-covariance weighted by ridge
+        C = PtF.T @ np.linalg.solve(PtP_reg, PtF)  # (Nneur x Nneur)
+        U_f, s_f, _ = np.linalg.svd(C, full_matrices=False)
+        
+        # Basis in predictor space
+        B = np.linalg.solve(PtP_reg, PtF @ U_f[:, :r_max])  # (Ppred x r)
+        r_eff = min(r_max, B.shape[1])
+        B = B[:, :r_eff]
+        PB = P @ B
+        evals = s_f[:r_eff]
+        
+    elif method == 'covariance':
+        # Maximize covariance: find B such that Cov(P*B, F) is maximized
+        # Solves: (P'F F'P) b = λ (P'P + lam*I) b
+        PtP = P.T @ P
+        Cxy = P.T @ F  # (Ppred x Nneur)
+        A = Cxy @ Cxy.T  # (Ppred x Ppred)
+        S = PtP + lam_rr * np.eye(Ppred, dtype=P.dtype)
+        
+        evals_all, vecs_all = eigh(A, S)
+        order = np.argsort(evals_all)[::-1]
+        evals_all = evals_all[order]
+        vecs_all = vecs_all[:, order]
+        r_eff = min(r_max, vecs_all.shape[1])
+        
+        B = vecs_all[:, :r_eff]
+        PB = P @ B
+        evals = evals_all[:r_eff]
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    return B, PB, evals
+
+
+def _fit_single_neuron_rrr(n, y, PB, B, r_grid, l1_ratio, alphas, cv, random_state, verbose):
+    """Helper function to fit RRR for a single neuron (for parallelization)"""
+    from sklearn.model_selection import KFold
+    from sklearn.metrics import r2_score
+    from sklearn.linear_model import Ridge, RidgeCV, ElasticNetCV
+    
+    T = len(y)
+    Ppred = B.shape[0]
+    
+    best_cv_score, best_r, best_alpha = -np.inf, None, None
+    
+    # Rank selection
+    for r in r_grid:
+        Xr = PB[:, :r]
+        
+        if l1_ratio == 0.0:
+            model = RidgeCV(alphas=alphas, cv=cv)
+            model.fit(Xr, y)
+            cv_score = model.score(Xr, y)
+        else:
+            model = ElasticNetCV(l1_ratio=l1_ratio, alphas=alphas, cv=cv,
+                                 fit_intercept=True, n_jobs=1,  # Don't nest parallelism
+                                 random_state=random_state)
+            model.fit(Xr, y)
+            cv_score = model.score(Xr, y)
+        
+        if cv_score > best_cv_score:
+            best_cv_score, best_r, best_alpha = cv_score, r, model.alpha_
+    
+    # Refit with best rank
+    r = best_r
+    Xr = PB[:, :r]
+    
+    if l1_ratio == 0.0:
+        model = Ridge(alpha=best_alpha, fit_intercept=True)
+    else:
+        model = ElasticNetCV(l1_ratio=l1_ratio, alphas=alphas, cv=cv,
+                             fit_intercept=True, n_jobs=1,
+                             random_state=random_state)
+    model.fit(Xr, y)
+    
+    w = model.coef_.copy() if hasattr(model.coef_, 'copy') else model.coef_
+    b0 = model.intercept_
+    k = (B[:, :r] @ w)
+    
+    # CV for explained variance
+    kf = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+    cv_preds = np.zeros(T)
+    for train_idx, test_idx in kf.split(Xr):
+        Xr_train, Xr_test = Xr[train_idx], Xr[test_idx]
+        y_train = y[train_idx]
+        
+        if l1_ratio == 0.0:
+            cv_model = Ridge(alpha=best_alpha, fit_intercept=True)
+        else:
+            cv_model = ElasticNetCV(l1_ratio=l1_ratio, alphas=alphas, cv=3,
+                                    fit_intercept=True, n_jobs=1,
+                                    random_state=random_state)
+        cv_model.fit(Xr_train, y_train)
+        cv_preds[test_idx] = cv_model.predict(Xr_test)
+    
+    ev = r2_score(y, cv_preds)
+    y_hat = Xr @ w + b0
+    
+    if verbose:
+        print(f"Neuron {n:4d} | r={r:2d} | alpha={best_alpha:.2e} | CV-EV={ev:.3f}")
+    
+    # Return best_alpha so it can be reused for UEV
+    return k, b0, ev, y_hat, r, best_alpha
+
+
+def fit_rrr_elasticnet(P, F, lam_rr=1e-2, l1_ratio=0.0, alphas=None, cv=5,
+                       r_grid=None, n_jobs=None, random_state=0, verbose=False,
+                       rrr_method='ridge_svd', fit_full_rank=False):
+    """
+    Full RRR pipeline + per-neuron Ridge/ElasticNet on PB with rank selection.
+    Inputs:
+      P: (T x Ppred) design matrix
+      F: (Nneur x T) or (T x Nneur) — we'll accept either
+      l1_ratio: 0.0 = Ridge (recommended), 0.5 = ElasticNet, 1.0 = Lasso
+      rrr_method: 'ridge_svd' (default), 'classic', or 'covariance'
+    Returns:
+      beta:                 (Nneur x Ppred) per-neuron kernels in predictor space
+      intercepts:           (Nneur,)
+      explained_variances:  (Nneur,) - CROSS-VALIDATED
+      preds:                (T x Nneur)
+      B, PB:                basis objects (P@B == PB)
+    """
+    from sklearn.model_selection import KFold
+    from sklearn.metrics import r2_score
+    from sklearn.linear_model import RidgeCV
+    
+    # Ensure time-first
+    if F.shape[0] < F.shape[1]:   # (Nneur x T) -> (T x Nneur)
+        F = F.T
+    
+    T, Ppred = P.shape
+    _, Nneur = F.shape
+
+    # basis
+    B, PB, evals = compute_rrr_basis(P, F, lam_rr=lam_rr, method=rrr_method)
+
+    r_max = PB.shape[1]
+    print('r_max', r_max)
+    if r_grid is None:
+        # Start from rank 1
+        if not fit_full_rank:
+            r_grid = list(range(1, min(50, r_max) + 1))
+        else:
+            r_grid = list(range(r_max, r_max + 1))
+    
+    # Set up regularization
+    if l1_ratio == 0.0:
+        # Use Ridge (no L1 penalty) - better for RRR
+        if alphas is None:
+            alphas = np.logspace(-4, 2, 30)
+    else:
+        # Use ElasticNet
+        if alphas is None:
+            alphas = np.logspace(-4, 0, 20)
+
+    # Parallel processing across neurons
+    from joblib import Parallel, delayed
+    
+    print(f'Fitting {Nneur} neurons with n_jobs={n_jobs}')
+    results = Parallel(n_jobs=n_jobs, verbose=10 if verbose else 0)(
+        delayed(_fit_single_neuron_rrr)(
+            n, F[:, n], PB, B, r_grid, l1_ratio, alphas, cv, random_state, verbose
+        )
+        for n in range(Nneur)
+    )
+    
+    # Unpack results
+    beta = np.array([r[0] for r in results])
+    intercepts = np.array([r[1] for r in results])
+    explained_variances = np.array([r[2] for r in results])
+    preds = np.array([r[3] for r in results]).T  # (T x Nneur)
+    best_alphas = np.array([r[5] for r in results])  # Store optimal alphas
+
+    return beta, intercepts, explained_variances, preds, B, PB, best_alphas
+
+# ---------- unique explained variance ----------
+def _compute_uev_single_neuron(n, y, P, b0, k, group_indices, unique_predictor_names,
+                               l1_ratio, alphas, cv, random_state, refit, var_y_n, 
+                               fixed_alpha=None):
+    """Helper function to compute unique EV for a single neuron (for parallelization)"""
+    from sklearn.linear_model import Ridge, ElasticNetCV, RidgeCV
+    from sklearn.model_selection import KFold
+    
+    T = len(y)
+    UEV_neuron = np.zeros(len(unique_predictor_names), dtype=float)
+    
+    # If fixed_alpha provided, use it for all groups (much faster)
+    # Otherwise use the middle alpha value
+    if fixed_alpha is None:
+        use_alpha = alphas[len(alphas)//2] if l1_ratio == 0.0 else None
+    else:
+        use_alpha = fixed_alpha
+    
+    for g, idx_g in enumerate(group_indices):
+        if idx_g.size == 0 or var_y_n == 0:
+            UEV_neuron[g] = 0.0
+            continue
+        
+        mask = np.ones(P.shape[1], dtype=bool)
+        mask[idx_g] = False
+        idx_other = np.where(mask)[0]
+        
+        # Use cross-validation
+        kf = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+        cv_residuals = np.zeros(T)
+        cv_res_hat = np.zeros(T)
+        
+        for train_idx, test_idx in kf.split(P):
+            P_train, P_test = P[train_idx], P[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+            
+            if refit:
+                X_other_train = P_train[:, idx_other]
+                X_other_test = P_test[:, idx_other]
+                
+                if l1_ratio == 0.0:
+                    # Use fixed alpha (no CV search) for speed
+                    model_other = Ridge(alpha=use_alpha, fit_intercept=True)
+                else:
+                    # Reduce alphas for speed
+                    model_other = ElasticNetCV(l1_ratio=l1_ratio, 
+                                              alphas=alphas[::2],  # Use every other alpha
+                                              cv=2,  # Reduce CV folds
+                                              fit_intercept=True, n_jobs=1, 
+                                              random_state=random_state)
+                model_other.fit(X_other_train, y_train)
+                yhat_other_test = model_other.predict(X_other_test)
+            else:
+                yhat_other_test = P_test[:, idx_other] @ k[idx_other] + b0
+            
+            res_test = y_test - yhat_other_test
+            cv_residuals[test_idx] = res_test
+            
+            if refit:
+                yhat_other_train = model_other.predict(X_other_train)
+            else:
+                yhat_other_train = P_train[:, idx_other] @ k[idx_other] + b0
+            res_train = y_train - yhat_other_train
+            
+            Xg_train = P_train[:, idx_g]
+            Xg_test = P_test[:, idx_g]
+            if Xg_train.ndim == 1:
+                Xg_train = Xg_train.reshape(-1, 1)
+                Xg_test = Xg_test.reshape(-1, 1)
+            
+            if l1_ratio == 0.0:
+                # Use fixed alpha (no CV search) for speed
+                model_g = Ridge(alpha=use_alpha, fit_intercept=False)
+            else:
+                # Reduce alphas for speed
+                model_g = ElasticNetCV(l1_ratio=l1_ratio, 
+                                      alphas=alphas[::2],  # Use every other alpha
+                                      cv=2,  # Reduce CV folds
+                                      fit_intercept=False,
+                                      n_jobs=1, random_state=random_state)
+            model_g.fit(Xg_train, res_train)
+            cv_res_hat[test_idx] = model_g.predict(Xg_test)
+        
+        # Unique EV following Musall et al. approach:
+        # How much variance in the RESIDUAL (from model without g) does group g explain?
+        # This tells us what group g uniquely contributes beyond other predictors
+        var_residual_without_g = np.var(cv_residuals)
+        var_residual_with_g = np.var(cv_residuals - cv_res_hat)
+        
+        # Fraction of residual variance explained by group g
+        if var_residual_without_g > 0:
+            UEV_neuron[g] = 1.0 - (var_residual_with_g / var_residual_without_g)
+        else:
+            UEV_neuron[g] = 0.0
+    
+    return UEV_neuron
+
+
+def compute_unique_explained_variance(P, F, beta, intercepts,
+                                      predictor_names, unique_predictor_names,
+                                      l1_ratio=0.5, alphas=None, cv=5, n_jobs=None,
+                                      random_state=0, refit=True, fixed_alpha=None,
+                                      per_neuron_alphas=None):
+    """
+    Compute unique explained variance for each predictor group.
+    
+    Two methods:
+    1. refit=True (default, recommended): 
+       - Refit model without group g, compute residual, fit residual with group g
+       - More accurate, accounts for how other predictors compensate
+       
+    2. refit=False (faster):
+       - Use original coefficients, remove group g contribution, fit residual
+       - Faster but assumes coefficients don't change much when removing group
+    
+    For each unique predictor group g:
+      - identify columns idx_g = [i for i,name in enumerate(predictor_names) if unique in name]
+      - compute residual (method depends on 'refit')
+      - fit model on P[:, idx_g] to predict residual
+      - UEV_g = 1 - var(res - res_hat)/var(y)
+    
+    Returns UEV: (Nneur x G)
+    """
+    from sklearn.linear_model import Ridge, ElasticNetCV
+    
+    # time-first
+    if F.shape[0] < F.shape[1]:
+        F = F.T
+    T, Nneur = F.shape
+    P = np.asarray(P)
+    beta = np.asarray(beta)       # (Nneur x Ppred)
+    intercepts = np.asarray(intercepts)
+
+    if alphas is None:
+        # Fewer alphas for speed
+        alphas = np.logspace(-3, 2, 10)
+
+    # Build index lists for each unique group
+    group_indices = []
+    for uname in unique_predictor_names:
+        idx = [i for i, nm in enumerate(predictor_names) if uname in nm]
+        group_indices.append(np.array(idx, dtype=int))
+
+    # precompute total var(y) per neuron
+    var_y = np.var(F, axis=0)
+
+    # Parallel processing across neurons
+    from joblib import Parallel, delayed
+    
+    print(f'Computing unique EV for {Nneur} neurons with n_jobs={n_jobs}')
+    UEV_list = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(_compute_uev_single_neuron)(
+            n, F[:, n], P, intercepts[n], beta[n, :], 
+            group_indices, unique_predictor_names,
+            l1_ratio, alphas, cv, random_state, refit, var_y[n],
+            # Use per-neuron alpha if available, otherwise fall back to fixed_alpha
+            per_neuron_alphas[n] if per_neuron_alphas is not None else fixed_alpha
+        )
+        for n in range(Nneur)
+    )
+    
+    UEV = np.array(UEV_list)
+
+    return UEV
+
+def rrr_encoding_model_with_unique_ev(
+    F,                   # (n_neurons x T) or (T x n_neurons)
+    design_matrix,       # (T x P)
+    predictor_names,     # list[str] length P
+    unique_predictor_names,  # list[str]
+    lam_rr=1e-2,
+    enet_l1_ratio=0.0,   # Default to Ridge (0.0) instead of ElasticNet
+    alphas=None,
+    cv=5,
+    n_jobs=None,
+    random_state=0,
+    verbose=False,
+    rrr_method='ridge_svd',  # 'ridge_svd', 'classic', or 'covariance'
+    refit_uev=True,      # Refit models for unique EV (more accurate but slower)
+    fit_full_rank=False,
+    uev_fixed_alpha=None,  # Fixed alpha for UEV (faster, e.g., 1.0)
+):
+    beta, intercepts, explained_variances, preds, B, PB, best_alphas = fit_rrr_elasticnet(
+        P=design_matrix,
+        F=F,
+        lam_rr=lam_rr,
+        l1_ratio=enet_l1_ratio,
+        alphas=alphas,
+        cv=cv,
+        n_jobs=n_jobs,
+        random_state=random_state,
+        verbose=verbose,
+        rrr_method=rrr_method,
+        fit_full_rank=fit_full_rank,
+    )
+
+    # Use per-neuron alphas from main fit for UEV (unless uev_fixed_alpha is specified)
+    UEV = compute_unique_explained_variance(
+        P=design_matrix,
+        F=F,
+        beta=beta,
+        intercepts=intercepts,
+        predictor_names=predictor_names,
+        unique_predictor_names=unique_predictor_names,
+        l1_ratio=enet_l1_ratio,
+        alphas=alphas,
+        cv=cv,
+        n_jobs=n_jobs,
+        random_state=random_state,
+        refit=refit_uev,
+        fixed_alpha=uev_fixed_alpha,
+        per_neuron_alphas=best_alphas if uev_fixed_alpha is None else None,
+    )
+
+    # Conform to your previous tuple signature
+    # These are placeholders you said you don't need now.
+    F_statistics = None
+    p_values = None
+    bootstrap_p_values = None
+    bootstrap_F_stats = None
+    confidence_intervals = None
+    negative_RSS_diff_counts = None
+
+    return (
+        beta,                    # (n_neurons x P)
+        intercepts,              # (n_neurons,)
+        explained_variances,     # (n_neurons,)
+        UEV,                     # (n_neurons x len(unique_predictor_names))
+        F_statistics,
+        p_values,
+        bootstrap_p_values,
+        bootstrap_F_stats,
+        confidence_intervals,
+        negative_RSS_diff_counts,
+    )
