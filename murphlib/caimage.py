@@ -7,13 +7,10 @@ from scipy.signal import butter, filtfilt
 from scipy.ndimage import percentile_filter
 
 def find_frame_indices(dataframe, frame_rate, time_window, column_keyword):
-    # Step 1: Identify the correct column
-    for col in dataframe.columns:
-        if column_keyword in col:
-            target_column = col
-            break
-    else:  # If no column contains the keyword
-        raise ValueError(f"No column found containing the keyword '{column_keyword}'")
+    try:
+        target_column = dataframe[column_keyword].name
+    except KeyError:
+        raise ValueError(f"No column found exactly matching '{column_keyword}'")
     
     # Step 2: Calculate frame indices for each element
     indices_list = []
@@ -45,7 +42,11 @@ def get_trial_PSTH(ca_imaging_data, frame_idx, zscore=True):
 
     for trial in range(num_trials):
         idx = frame_idx[trial, :]
-        trial_psth = ca_imaging_data[:, idx]
+        try:
+            trial_psth = ca_imaging_data[:, idx]
+        except:
+            print(f"Error: trial {trial} / {num_trials} has no frames")
+            continue
         psth[trial, :, :] = trial_psth
         if zscore:
             # Calculate mean and std for Z-score normalization, across frames for each cell

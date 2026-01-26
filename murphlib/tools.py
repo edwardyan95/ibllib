@@ -262,7 +262,8 @@ def attach_reg_model_to_stat(stat, model):
         except:
             continue
         try:
-            s['bootstrap_p_value'] = holm_bonferroni_correction(model[i]['bootstrap_p_value'])
+            # s['bootstrap_p_value'] = holm_bonferroni_correction(model[i]['bootstrap_p_value'])
+            s['bootstrap_p_value'] = fdr_bh_correction(model[i]['bootstrap_p_value'])
         except:
             continue
         try:
@@ -328,6 +329,60 @@ def holm_bonferroni_correction(p_values):
         
         # Map back to original order
         p_corrected[i] = p_corrected_sorted[ranks]
+    
+    # If input was 1D, convert output back to 1D
+    if input_is_1d:
+        p_corrected = p_corrected.flatten()
+    
+    return p_corrected
+
+def fdr_bh_correction(p_values):
+    """
+    Apply Benjamini-Hochberg FDR correction across tests.
+    
+    Parameters:
+    p_values: array of shape (num_tests,) for a single neuron
+              or shape (num_neurons, num_tests) for multiple neurons
+    
+    Returns:
+    corrected p-values of same shape as input
+    """
+    # Check if input is 1D or 2D
+    input_is_1d = p_values.ndim == 1
+    
+    # If 1D, convert to 2D temporarily
+    if input_is_1d:
+        p_values = p_values.reshape(1, -1)
+    
+    num_neurons, num_tests = p_values.shape
+    p_corrected = np.zeros_like(p_values, dtype=float)
+    
+    # Apply BH FDR separately for each neuron
+    for i in range(num_neurons):
+        p_neuron = p_values[i].astype(float)
+        
+        # Sort p-values
+        sorted_indices = np.argsort(p_neuron)
+        p_sorted = p_neuron[sorted_indices]
+        
+        # Ranks: 1..m
+        ranks = np.arange(1, num_tests + 1)
+        
+        # Raw BH adjusted p-values
+        p_adj_sorted = p_sorted * num_tests / ranks
+        
+        # Enforce monotonicity from largest rank to smallest
+        # (cumulative minimum when going backwards)
+        p_adj_sorted = np.minimum.accumulate(p_adj_sorted[::-1])[::-1]
+        
+        # Cap at 1
+        p_adj_sorted = np.minimum(p_adj_sorted, 1.0)
+        
+        # Map back to original order
+        p_neuron_corrected = np.empty_like(p_adj_sorted)
+        p_neuron_corrected[sorted_indices] = p_adj_sorted
+        
+        p_corrected[i] = p_neuron_corrected
     
     # If input was 1D, convert output back to 1D
     if input_is_1d:
@@ -540,3 +595,95 @@ def is_under(file_path, dir_path):
     except RuntimeError:
         # In rare cases (bad symlinks, permissions), just fail safe
         return False
+    
+def neuron_pixel_mask(neurons, atlas_shape):
+    """
+    Build a boolean mask of all pixels covered by all neurons (union).
+    """
+    H, W = atlas_shape[:2]
+    M = np.zeros((H, W), dtype=bool)
+
+    for n in neurons:
+        if ('xcoord_atlas' not in n) or ('ycoord_atlas' not in n):
+            continue
+        x = np.asarray(n['xcoord_atlas'], dtype=int)
+        y = np.asarray(n['ycoord_atlas'], dtype=int)
+        if x.size == 0 or y.size == 0:
+            continue
+
+        ok = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+        if np.any(ok):
+            M[y[ok], x[ok]] = True
+
+    return M
+
+
+def neuron_centroids(neurons, atlas_shape, method="median"):
+    """
+    Compute one (x,y) centroid per neuron (robust by default).
+    Returns arrays: xc, yc  (x = col, y = row)
+    """
+    H, W = atlas_shape[:2]
+    xs, ys = [], []
+
+    for n in neurons:
+        if ('xcoord_atlas' not in n) or ('ycoord_atlas' not in n):
+            continue
+        x = np.asarray(n['xcoord_atlas'], dtype=float)
+        y = np.asarray(n['ycoord_atlas'], dtype=float)
+        if x.size == 0 or y.size == 0:
+            continue
+
+        # keep only in-bounds points before centroid
+        ok = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+        if not np.any(ok):
+            continue
+        x = x[ok]
+        y = y[ok]
+
+        if method == "mean":
+            xc, yc = np.mean(x), np.mean(y)
+        else:
+            xc, yc = np.median(x), np.median(y)
+
+        xs.append(xc)
+        ys.append(yc)
+
+    return np.asarray(xs), np.asarray(ys)
+
+
+def overlay_neurons_on_atlas(
+    atlas_template,
+    neurons,
+    title=None,
+    show_pixels=True,
+    show_centroids=True,
+    centroid_size=10,
+    alpha_pixels=0.35,
+):
+    """
+    Display atlas and overlay neuron pixels (mask) and/or centroids.
+    """
+    H, W = atlas_template.shape[:2]
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.imshow(atlas_template, interpolation="nearest")
+
+    if show_pixels:
+        M = neuron_pixel_mask(neurons, atlas_template.shape)
+        # show mask as a transparent overlay (default colormap)
+        ax.imshow(M, alpha=alpha_pixels, interpolation="nearest")
+
+    if show_centroids:
+        xc, yc = neuron_centroids(neurons, atlas_template.shape, method="median")
+        ax.scatter(xc, yc, s=centroid_size)
+
+    ax.set_xlim([0, W - 1])
+    ax.set_ylim([H - 1, 0])  # keep image coords (row 0 at top)
+    ax.set_axis_off()
+    if title is not None:
+        ax.set_title(title)
+    return fig, ax
+
+def rgb_to_grayscale(rgb_image):
+    return np.dot(rgb_image[..., :3], [0.2989, 0.5870, 0.1140])

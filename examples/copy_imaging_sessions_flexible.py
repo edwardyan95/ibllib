@@ -12,6 +12,9 @@ Usage:
   # Copy all files
   python copy_imaging_sessions_flexible.py "Z:\TM_Lab\Edward\Cerebellum_Imaging\Pcp2-jgcamp8m" "I:\Cerebellum_imaging" --mice AF_L2
   
+  # Copy multiple mice
+  python copy_imaging_sessions_flexible.py "Z:\TM_Lab\Edward\Cerebellum_Imaging\Pcp2-jgcamp8m" "I:\Cerebellum_imaging" --mice AF_R2 AF_R3 AF_L3 AE_L2
+  
   # Copy only files larger than 5GB
   python copy_imaging_sessions_flexible.py "Z:\TM_Lab\Edward\Cerebellum_Imaging\Pcp2-jgcamp8m" "I:\Cerebellum_imaging" --mice AF_L2 --min-gb 5.0
   
@@ -156,8 +159,8 @@ def main():
     parser = argparse.ArgumentParser(description="Copy selected mouse sessions with flexible file-size filtering.")
     parser.add_argument("src_root", type=str, help="Path to Cerebellum_Imaging source root")
     parser.add_argument("dest_root", type=str, help="Destination root")
-    parser.add_argument("--mice", type=str, required=True,
-                        help="Comma-separated list of mouse folder names to include, e.g. M123,M456")
+    parser.add_argument("--mice", type=str, nargs='+', required=True,
+                        help="One or more mouse folder names to include, e.g. AF_R2 AF_R3 AF_L3")
     parser.add_argument("--min-gb", type=float, default=None,
                         help="Minimum file size in GB (files smaller than this will be skipped)")
     parser.add_argument("--max-gb", type=float, default=None,
@@ -170,7 +173,7 @@ def main():
 
     src_root = Path(args.src_root).resolve()
     dest_root = Path(args.dest_root).resolve()
-    mice = [m.strip() for m in args.mice.split(",") if m.strip()]
+    mice = args.mice
     
     # Convert size limits to bytes
     min_size_bytes = int(args.min_gb * (1024**3)) if args.min_gb is not None else None
