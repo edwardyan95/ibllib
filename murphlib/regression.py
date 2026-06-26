@@ -365,11 +365,12 @@ def construct_design_matrix(event_predictors_list, event_predictor_names,
     predictor_names = []
     
     # Z-score and add event predictors and their names
-    for event_predictors, event_name in zip(event_predictors_list, event_predictor_names):
-        if np.sum(event_predictors==0) == len(event_predictors): # all zero arrays cannot be zscored
-            pass
-        else:
-            zscored_event = zscore(event_predictors)  # Z-score each event predictor
+    if event_predictors_list is not None:
+        for event_predictors, event_name in zip(event_predictors_list, event_predictor_names):
+            if np.sum(event_predictors==0) == len(event_predictors): # all zero arrays cannot be zscored
+                zscored_event = np.zeros_like(event_predictors)
+            else:
+                zscored_event = zscore(event_predictors)  # Z-score each event predictor
         predictors.append(zscored_event)
         predictor_names.append(event_name)
     
@@ -381,10 +382,11 @@ def construct_design_matrix(event_predictors_list, event_predictor_names,
             predictor_names.append(name)
     
     # Z-score and add continuous predictors and their names
-    for continuous_predictors, continuous_name in zip(continuous_predictors_list, continuous_predictor_names):
-        zscored_continuous = zscore(continuous_predictors)  # Z-score each continuous predictor
-        predictors.append(zscored_continuous)
-        predictor_names.append(continuous_name)
+    if continuous_predictors_list is not None:
+        for continuous_predictors, continuous_name in zip(continuous_predictors_list, continuous_predictor_names):
+            zscored_continuous = zscore(continuous_predictors)  # Z-score each continuous predictor
+            predictors.append(zscored_continuous)
+            predictor_names.append(continuous_name)
     
     # Stack all predictors as columns in the design matrix
     design_matrix = np.column_stack(predictors)
@@ -502,146 +504,223 @@ def bootstrap_iteration(iteration, F, design_matrix, kf, unique_predictors, full
     return F_stats, RSS_diffs, full_RSS, red_RSS
 
 def encoding_model_with_significance_cv(
-    F, 
-    design_matrix, 
+    F,
+    design_matrix,
     frame_rate,
-    regression_type='linear', 
-    alpha=1.0,  # renamed from alpha to avoid confusion
-    n_splits=5, 
+    regression_type="linear",
+    alpha=1.0,
+    n_splits=5,
     n_bootstraps=100,
-    unique_predictors=None, 
+    unique_predictors=None,
     full_predictors=None,
     n_jobs=-1,
-    show_progress=True
+    show_progress=True,
 ):
     """
-    Encoding model analysis with cross-validated F-statistics and block bootstrap testing.
-    
-    Returns beta coefficients, intercepts, explained variances, and significance measures.
+    Encoding model analysis with:
+      - Full-data fit for betas/intercepts
+      - CROSS-VALIDATED explained variance (EV) and unique explained variance (UEV)
+      - Cross-validated F-statistics (via compute_cv_F_stats)
+      - Block bootstrap p-values on CV F-stats
+
+    Returns:
+      beta_matrix,
+      intercepts,
+      explained_variances_cv,
+      unique_explained_variances_cv,
+      F_statistics,
+      p_values,
+      bootstrap_p_values,
+      bootstrap_F_stats,
+      confidence_intervals,
+      negative_RSS_diff_counts,
+
+      # (optional extras at end for debugging/inspection)
+      explained_variances_in_sample,
+      unique_explained_variances_in_sample
     """
+    if unique_predictors is None or full_predictors is None:
+        raise ValueError("unique_predictors and full_predictors must be provided.")
+
     num_neurons, T = F.shape
-    num_predictors = design_matrix.shape[1]
+    X = np.asarray(design_matrix)
+    if X.shape[0] != T:
+        raise ValueError(f"design_matrix must have T rows. Got X.shape[0]={X.shape[0]} vs T={T}.")
+
+    num_predictors = X.shape[1]
     num_unique_predictors = len(unique_predictors)
-    
-    # Initialize arrays
+
+    # ------------------------- allocate outputs -------------------------
     beta_matrix = np.zeros((num_neurons, num_predictors))
     intercepts = np.zeros(num_neurons)
-    explained_variances = np.zeros(num_neurons)
-    unique_explained_variances = np.zeros((num_neurons, num_unique_predictors))
+
+    explained_variances_cv = np.zeros(num_neurons)
+    unique_explained_variances_cv = np.zeros((num_neurons, num_unique_predictors))
+
     F_statistics = np.zeros((num_neurons, num_unique_predictors))
-    p_values = np.zeros((num_neurons, num_unique_predictors))
-    bootstrap_p_values = np.zeros((num_neurons, num_unique_predictors))
-    
-    # Cross-validation setup
+    p_values = np.ones((num_neurons, num_unique_predictors))
+    bootstrap_p_values = np.ones((num_neurons, num_unique_predictors))
+
+    # (optional / legacy)
+    explained_variances_in_sample = np.zeros(num_neurons)
+    unique_explained_variances_in_sample = np.zeros((num_neurons, num_unique_predictors))
+
+    # ------------------------- CV setup -------------------------
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-    
-    # Choose regression model type
-    if regression_type == 'linear':
+
+    # ------------------------- choose regression model -------------------------
+    if regression_type == "linear":
         RegModel = lambda: LinearRegression(fit_intercept=True)
-    elif regression_type == 'ridge':
+    elif regression_type == "ridge":
         RegModel = lambda: Ridge(alpha=alpha, fit_intercept=True)
-    elif regression_type == 'lasso':
+    elif regression_type == "lasso":
+        # NOTE: MultiTaskLasso expects multi-target Y; fine here (T x num_neurons)
         RegModel = lambda: MultiTaskLasso(alpha=alpha, fit_intercept=True)
     else:
         raise ValueError("Invalid regression type. Choose 'linear', 'lasso', or 'ridge'.")
-    
-    # Check for collinearity using VIF
-    _ = check_multicollinearity(design_matrix, full_predictors,
-                            vif_thresh=5.0, corr_thresh=0.90, cond_thresh=1e4, verbose=True)
-    
-    # Fit full model on entire dataset to get beta coefficients and intercepts
-    full_model = RegModel()
-    full_model.fit(design_matrix, F.T)
-    beta_matrix = full_model.coef_
-    intercepts = full_model.intercept_
-    
-    # Calculate total explained variance for each neuron
-    y_pred = full_model.predict(design_matrix)
-    total_ss = np.sum((F.T - np.mean(F.T, axis=0))**2, axis=0)
-    residual_ss = np.sum((F.T - y_pred)**2, axis=0)
-    explained_variances = 1 - (residual_ss / total_ss)
-    
-    # Calculate unique explained variance for each predictor
-    for unique_idx, unique_name in enumerate(unique_predictors):
-        # Remove columns corresponding to this predictor
-        columns_to_remove = [i for i, name in enumerate(full_predictors) if unique_name in name]
-        X_reduced = np.delete(design_matrix, columns_to_remove, axis=1)
-        
-        # Fit reduced model
-        reduced_model = RegModel()
-        reduced_model.fit(X_reduced, F.T)
-        y_pred_reduced = reduced_model.predict(X_reduced)
-        
-        # Calculate unique explained variance
-        residual_ss_reduced = np.sum((F.T - y_pred_reduced)**2, axis=0)
-        unique_explained_variances[:, unique_idx] = (residual_ss_reduced - residual_ss) / total_ss
-    
-    # Compute real cross-validated F-statistics and RSS values
-    F_statistics, RSS_differences, real_full_RSS, real_reduced_RSS = compute_cv_F_stats(
-        F, design_matrix, kf, unique_predictors, full_predictors, RegModel
+
+    # ------------------------- multicollinearity check -------------------------
+    _ = check_multicollinearity(
+        X,
+        full_predictors,
+        vif_thresh=5.0,
+        corr_thresh=0.90,
+        cond_thresh=1e4,
+        verbose=True,
     )
-    
-    # Calculate parametric p-values with correction for multiple comparisons
+
+    # ------------------------- full-data fit (betas/intercepts) -------------------------
+    y_all = F.T  # (T, num_neurons)
+    full_model = RegModel()
+    full_model.fit(X, y_all)
+    beta_matrix = full_model.coef_        # (num_neurons, num_predictors)
+    intercepts = full_model.intercept_    # (num_neurons,)
+
+    # ------------------------- (optional) in-sample EV + UEV -------------------------
+    y_pred = full_model.predict(X)  # (T, num_neurons)
+    total_ss = np.sum((y_all - np.mean(y_all, axis=0, keepdims=True)) ** 2, axis=0)
+    residual_ss = np.sum((y_all - y_pred) ** 2, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        explained_variances_in_sample = 1.0 - (residual_ss / total_ss)
+    explained_variances_in_sample[~np.isfinite(explained_variances_in_sample)] = np.nan
+
+    for u_idx, unique_name in enumerate(unique_predictors):
+        cols = [i for i, name in enumerate(full_predictors) if unique_name in name]
+        X_red = np.delete(X, cols, axis=1)
+
+        red_model = RegModel()
+        red_model.fit(X_red, y_all)
+        y_pred_red = red_model.predict(X_red)
+
+        residual_ss_red = np.sum((y_all - y_pred_red) ** 2, axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            unique_explained_variances_in_sample[:, u_idx] = (residual_ss_red - residual_ss) / total_ss
+
+    unique_explained_variances_in_sample[~np.isfinite(unique_explained_variances_in_sample)] = np.nan
+
+    # ------------------------- CROSS-VALIDATED EV + UEV (FIX INCORPORATED) -------------------------
+    # Precompute which columns correspond to each unique predictor
+    columns_to_remove_list = []
+    for unique_name in unique_predictors:
+        cols = [i for i, name in enumerate(full_predictors) if unique_name in name]
+        columns_to_remove_list.append(cols)
+
+    RSS_full = np.zeros(num_neurons)                         # sum over folds
+    TSS = np.zeros(num_neurons)                              # sum over folds (using train mean baseline)
+    RSS_reduced = np.zeros((num_neurons, num_unique_predictors))
+
+    for train_idx, test_idx in kf.split(X):
+        X_train = X[train_idx, :]
+        X_test = X[test_idx, :]
+
+        y_train = F[:, train_idx].T  # (n_train, num_neurons)
+        y_test = F[:, test_idx].T    # (n_test, num_neurons)
+
+        # baseline: train mean per neuron, evaluated on test
+        y_train_mean = np.mean(y_train, axis=0, keepdims=True)  # (1, num_neurons)
+        TSS += np.sum((y_test - y_train_mean) ** 2, axis=0)
+
+        # full model
+        m_full = RegModel()
+        m_full.fit(X_train, y_train)
+        y_hat_full = m_full.predict(X_test)
+        RSS_full += np.sum((y_test - y_hat_full) ** 2, axis=0)
+
+        # reduced models
+        for u_idx, cols_to_remove in enumerate(columns_to_remove_list):
+            X_train_red = np.delete(X_train, cols_to_remove, axis=1)
+            X_test_red = np.delete(X_test, cols_to_remove, axis=1)
+
+            m_red = RegModel()
+            m_red.fit(X_train_red, y_train)
+            y_hat_red = m_red.predict(X_test_red)
+
+            RSS_reduced[:, u_idx] += np.sum((y_test - y_hat_red) ** 2, axis=0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        explained_variances_cv = 1.0 - (RSS_full / TSS)
+        for u_idx in range(num_unique_predictors):
+            unique_explained_variances_cv[:, u_idx] = (RSS_reduced[:, u_idx] - RSS_full) / TSS
+
+    # Handle flat neurons where TSS==0 etc.
+    explained_variances_cv[~np.isfinite(explained_variances_cv)] = np.nan
+    unique_explained_variances_cv[~np.isfinite(unique_explained_variances_cv)] = np.nan
+
+    # ------------------------- CV F-statistics -------------------------
+    F_statistics, RSS_differences, real_full_RSS, real_reduced_RSS = compute_cv_F_stats(
+        F, X, kf, unique_predictors, full_predictors, RegModel
+    )
+
+    # ------------------------- parametric p-values (approx df2) -------------------------
+    # df2 depends on fold test size; we use the *minimum* test size across folds for safety.
+    fold_test_sizes = [len(test_idx) for _, test_idx in kf.split(X)]
+    min_test_size = int(np.min(fold_test_sizes))
+
     for n in range(num_neurons):
-        for unique_idx in range(num_unique_predictors):
-            delta_p = len([i for i, name in enumerate(full_predictors) 
-                          if unique_predictors[unique_idx] in name])
-            df1 = delta_p
-            # Correct df2 calculation - use actual test set size
-            df2 = len(design_matrix) // n_splits - design_matrix.shape[1]
-            # Ensure degrees of freedom are positive
+        for u_idx in range(num_unique_predictors):
+            delta_p = len([i for i, name in enumerate(full_predictors) if unique_predictors[u_idx] in name])
+            df1 = max(int(delta_p), 1)
+            df2 = min_test_size - X.shape[1]
             if df2 <= 0:
-                p_values[n, unique_idx] = 1.0
+                p_values[n, u_idx] = 1.0
                 continue
-                
-            # Calculate raw p-value
-            raw_p = 1 - stats.f.cdf(F_statistics[n, unique_idx], df1, df2)
-            # Store raw p-value for multiple comparison correction later
-            p_values[n, unique_idx] = raw_p
-    
-    
-    # Perform parallel bootstrap iterations
-    block_size = int(frame_rate)  # 1 second blocks
-    
+            p_values[n, u_idx] = 1.0 - stats.f.cdf(F_statistics[n, u_idx], df1, df2)
+
+    # ------------------------- bootstrap on CV F-stats -------------------------
+    block_size = int(frame_rate)  # ~1 second blocks
+
     iterator = range(n_bootstraps)
     if show_progress:
-        iterator = tqdm(iterator, desc='Bootstraps')
-    
+        iterator = tqdm(iterator, desc="Bootstraps")
+
     bootstrap_results = Parallel(n_jobs=n_jobs)(
         delayed(bootstrap_iteration)(
-            i, F, design_matrix, kf, unique_predictors, full_predictors, RegModel, block_size
-        ) for i in iterator
+            i, F, X, kf, unique_predictors, full_predictors, RegModel, block_size
+        )
+        for i in iterator
     )
-    
-    # Unpack bootstrap results
-    bootstrap_F_stats = np.array([res[0] for res in bootstrap_results])
+
+    bootstrap_F_stats = np.array([res[0] for res in bootstrap_results])      # (B, num_neurons, num_unique)
     bootstrap_RSS_diffs = np.array([res[1] for res in bootstrap_results])
-    
-    # Compute bootstrap p-values
+
     for n in range(num_neurons):
-        for p in range(num_unique_predictors):
-            # Add 1 to both numerator and denominator (recommended practice)
-            bootstrap_p_values[n, p] = (1 + np.sum(
-                bootstrap_F_stats[:, n, p] >= F_statistics[n, p]
-            )) / (n_bootstraps + 1)
-            
-    
-    # Compute confidence intervals (95%)
+        for u_idx in range(num_unique_predictors):
+            bootstrap_p_values[n, u_idx] = (1 + np.sum(bootstrap_F_stats[:, n, u_idx] >= F_statistics[n, u_idx])) / (
+                n_bootstraps + 1
+            )
+
     confidence_intervals = np.zeros((num_neurons, num_unique_predictors, 2))
     for n in range(num_neurons):
-        for p in range(num_unique_predictors):
-            confidence_intervals[n, p] = np.percentile(
-                bootstrap_F_stats[:, n, p], [2.5, 97.5]
-            )
-    
-    # Count negative RSS differences
+        for u_idx in range(num_unique_predictors):
+            confidence_intervals[n, u_idx] = np.percentile(bootstrap_F_stats[:, n, u_idx], [2.5, 97.5])
+
     negative_RSS_diff_counts = np.sum(RSS_differences < 0, axis=0)
-    
+
     return (
         beta_matrix,
         intercepts,
-        explained_variances,
-        unique_explained_variances,
+        explained_variances_cv,
+        unique_explained_variances_cv,
         F_statistics,
         p_values,
         bootstrap_p_values,
@@ -649,6 +728,7 @@ def encoding_model_with_significance_cv(
         confidence_intervals,
         negative_RSS_diff_counts
     )
+
 
 def fix_encoding_model_cv_uev(
     F, 

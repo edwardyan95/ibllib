@@ -37,6 +37,7 @@ def sync_rotary_encoder(session_path, bpod_data=None, re_events=None, task_colle
     # the first trial on the rotary encoder is a dud
     rote = {'stim_on': tre[evt.sm_ev == 2][:-1],
             'closed_loop': tre[evt.sm_ev == 3][:-1]}
+    #print(f"Found {rote['stim_on'].size} stim_on and {rote['closed_loop'].size} closed_loop events on the rotary encoder")
     bpod = {
         'stim_on': np.array([tr['behavior_data']['States timestamps']
                              ['stim_on'][0][0] for tr in bpod_data]),

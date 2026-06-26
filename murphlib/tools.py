@@ -687,3 +687,121 @@ def overlay_neurons_on_atlas(
 
 def rgb_to_grayscale(rgb_image):
     return np.dot(rgb_image[..., :3], [0.2989, 0.5870, 0.1140])
+
+
+def assign_neuron_to_roi(
+    neuron,
+    roi_masks_bool,      # dict[str] -> (H,W) bool
+    frac_thresh=0.2,
+):
+    """
+    Returns (best_roi, best_frac) or (None, 0.0) if no ROI meets thresh.
+    """
+    if ('xcoord_atlas' not in neuron) or ('ycoord_atlas' not in neuron):
+        return None, 0.0
+
+    x = np.asarray(neuron['xcoord_atlas'], dtype=int)
+    y = np.asarray(neuron['ycoord_atlas'], dtype=int)
+    if x.size == 0 or y.size == 0:
+        return None, 0.0
+
+    best_roi = None
+    best_frac = 0.0
+
+    for roi_name, roi_mask in roi_masks_bool.items():
+        H, W = roi_mask.shape
+        ok = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+        if not np.any(ok):
+            continue
+
+        xx = x[ok]
+        yy = y[ok]
+        n_pix_total = xx.size
+        if n_pix_total == 0:
+            continue
+
+        n_pix_in_roi = np.count_nonzero(roi_mask[yy, xx])
+        frac_in_roi = n_pix_in_roi / n_pix_total
+
+        if frac_in_roi > best_frac:
+            best_frac = frac_in_roi
+            best_roi = roi_name
+
+    if best_roi is not None and best_frac > frac_thresh:
+        return best_roi, float(best_frac)
+    return None, 0.0
+
+from matplotlib.path import Path
+
+def polygon_to_mask(verts, atlas_shape):
+    """
+    verts: (N, 2) array of (x, y) in atlas coords (as returned by ginput on
+           an imshow(..., extent=[0,W,0,H], origin='upper'))
+    atlas_shape: (H, W)
+    Returns: mask (H, W) with True inside polygon.
+    """
+    H, W = atlas_shape
+
+    # pixel centers in *image index* space
+    x_idx, y_idx = np.meshgrid(
+        np.arange(W) + 0.5,      # columns
+        np.arange(H) + 0.5       # rows
+    )
+
+    # convert row indices to the SAME y coordinates used when drawing:
+    # origin='upper' + extent=[0,W,0,H] → row 0 is at y = H, row H-1 at y = 0
+    y_world = H - y_idx         # flip vertically
+    x_world = x_idx
+
+    pts = np.vstack([x_world.ravel(), y_world.ravel()]).T  # (H*W, 2)
+
+    path = Path(verts)
+    inside = path.contains_points(pts)
+    mask = inside.reshape(H, W)
+    return mask
+
+def polygons_to_masks(roi_polygons, atlas_shape):
+    """
+    roi_polygons: dict roi_name -> (N,2) array of vertices
+    Returns: dict roi_name -> mask (H,W)
+    """
+    masks = {}
+    for name, verts in roi_polygons.items():
+        masks[name] = polygon_to_mask(verts, atlas_shape)
+    return masks
+
+# Stage binning utilities (yours)
+# -----------------------------
+def rolling_average(x, w=3):
+    x = np.asarray(x, dtype=float)
+    if w <= 1 or x.size == 0:
+        return x
+    pad = np.pad(x, (w-1, 0), mode='edge')
+    c = np.cumsum(pad)
+    out = (c[w:] - c[:-w]) / w
+    head = np.full(w-1, out[0])
+    return np.concatenate([head, out])
+
+def classify_day_stage(vis_perf, aud_perf, vis_raw, aud_raw, perf_thresh=0.65):
+    """
+    Returns: 'naive' | 'vis_expert' | 'aud_expert' | 'db_expert'
+    Prefers rolling perf; falls back to raw day perf.
+    """
+    v = float(vis_perf) if np.isfinite(vis_perf) else float(vis_raw)
+    a = float(aud_perf) if np.isfinite(aud_perf) else float(aud_raw)
+    v_ok = (v > perf_thresh) or (vis_raw > perf_thresh)
+    a_ok = (a > perf_thresh) or (aud_raw > perf_thresh)
+    if v_ok and a_ok:     return 'db_expert'
+    if v_ok and not a_ok: return 'vis_expert'
+    if a_ok and not v_ok: return 'aud_expert'
+    return 'naive'
+
+def is_imaging_date_key(date_str: str) -> bool:
+    """Match your imaging session date keys."""
+    if date_str.isdigit():
+        return True
+    if date_str.endswith('_valvesilent') and date_str.replace('_valvesilent','').isdigit():
+        return True
+    if date_str.endswith('_valvesilent_punishsilent') and date_str.replace('_valvesilent_punishsilent','').isdigit():
+        return True
+    return False
